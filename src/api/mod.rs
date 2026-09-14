@@ -1,0 +1,321 @@
+pub mod models;
+
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use anyhow::{Context, Result, anyhow};
+use base64::Engine;
+use hmac::{Hmac, KeyInit, Mac};
+use sha2::Sha256;
+
+use models::*;
+
+const API: &str = "https://api.music.yandex.net";
+const CLIENT_HEADER: &str = "YandexMusicWebNext/1.0.0";
+/// The key Yandex signs file-link requests with.
+const SIGN_KEY: &[u8] = b"7tvSmFbyf5hJnIHhCimDDD";
+/// The "My Wave" station.
+pub const WAVE_STATION: &str = "user:onyourwave";
+/// Track metadata is fetched in batches — a liked list can be long.
+const META_CHUNK: usize = 250;
+/// How many times to retry a request that came back 429 or 5xx.
+const RETRIES: u32 = 4;
+const FIRST_RETRY_DELAY: Duration = Duration::from_millis(400);
+
+/// Sends a request, surviving temporary refusals.
+///
+/// Yandex hands out 429 readily if you poke it often, so we retry with a
+/// growing pause — otherwise the liked list fails to load for no good reason.
+async fn send_retrying(request: reqwest::RequestBuilder, what: &str) -> Result<reqwest::Response> {
+    let mut delay = FIRST_RETRY_DELAY;
+    let mut last: Option<anyhow::Error> = None;
+
+    for attempt in 0..RETRIES {
+        let attempt_request = request
+            .try_clone()
+            .ok_or_else(|| anyhow!("{what}: request cannot be retried"))?;
+
+        match attempt_request.send().await {
+            Ok(response) => {
+                let status = response.status();
+                let retriable = status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                    || status.is_server_error();
+                if !retriable {
+                    return response
+                        .error_for_status()
+                        .with_context(|| what.to_string());
+                }
+                last = Some(anyhow!("{what}: {status}"));
+            }
+            Err(e) => last = Some(anyhow!("{what}: {e}")),
+        }
+
+        if attempt + 1 < RETRIES {
+            tokio::time::sleep(delay).await;
+            delay *= 3;
+        }
+    }
+
+    Err(last.unwrap_or_else(|| anyhow!("{what}: gave up")))
+}
+
+/// Events the wave expects from a player so it can tune what it serves.
+#[derive(Debug, Clone)]
+pub enum Feedback {
+    RadioStarted,
+    TrackStarted { track_id: String },
+    TrackFinished { track_id: String, played_secs: f64 },
+    Skip { track_id: String, played_secs: f64 },
+}
+
+pub struct Client {
+    http: reqwest::Client,
+    token: String,
+    quality: String,
+    codecs: String,
+    pub uid: u64,
+    pub display_name: String,
+}
+
+impl Client {
+    pub async fn new(token: &str, quality: &str, codecs: &str) -> Result<Self> {
+        let http = reqwest::Client::builder()
+            .user_agent("tuiya/0.1")
+            .build()
+            .context("cannot build the http client")?;
+
+        let mut client = Client {
+            http,
+            token: token.to_string(),
+            quality: quality.to_string(),
+            codecs: codecs.to_string(),
+            uid: 0,
+            display_name: String::new(),
+        };
+
+        let status: Envelope<RawAccountStatus> = send_retrying(
+            client.get("/account/status"),
+            "Yandex rejected the token — check it in the config",
+        )
+        .await?
+        .json()
+        .await
+        .context("unexpected /account/status response")?;
+
+        client.uid = status.result.account.uid;
+        client.display_name = status
+            .result
+            .account
+            .display_name
+            .unwrap_or_else(|| "?".to_string());
+
+        Ok(client)
+    }
+
+    fn get(&self, path: &str) -> reqwest::RequestBuilder {
+        self.http
+            .get(format!("{API}{path}"))
+            .header(reqwest::header::AUTHORIZATION, format!("OAuth {}", self.token))
+            .header("X-Yandex-Music-Client", CLIENT_HEADER)
+    }
+
+    /// Downloads from the CDN: the link carries its own signature, no token needed.
+    pub fn http_get(&self, url: &str) -> reqwest::RequestBuilder {
+        self.http.get(url)
+    }
+
+    fn post(&self, path: &str) -> reqwest::RequestBuilder {
+        self.http
+            .post(format!("{API}{path}"))
+            .header(reqwest::header::AUTHORIZATION, format!("OAuth {}", self.token))
+            .header("X-Yandex-Music-Client", CLIENT_HEADER)
+    }
+
+    /// The next batch of "My Wave".
+    ///
+    /// `after` is the id of the last track played: it tells the station where
+    /// we stopped so it does not repeat itself.
+    pub async fn wave_tracks(&self, after: Option<&str>) -> Result<WaveBatch> {
+        let mut request = self
+            .get(&format!("/rotor/station/{WAVE_STATION}/tracks"))
+            .query(&[("settings2", "true")]);
+        if let Some(after) = after {
+            request = request.query(&[("queue", after)]);
+        }
+
+        let response: Envelope<RawWaveResult> = send_retrying(request, "the wave did not return tracks")
+            .await?
+            .json()
+            .await
+            .context("unexpected wave response")?;
+
+        let result = response.result;
+        // The `liked` flag in the station response is unreliable, so hearts
+        // are derived from the liked list instead.
+        let tracks = result
+            .sequence
+            .into_iter()
+            .map(|item| Track::from(item.track))
+            .collect();
+
+        Ok(WaveBatch {
+            tracks,
+            batch_id: result.batch_id,
+        })
+    }
+
+    /// Ids of liked tracks, most recent first.
+    pub async fn liked_track_ids(&self) -> Result<Vec<String>> {
+        let response: Envelope<RawLikesResult> = send_retrying(
+            self.get(&format!("/users/{}/likes/tracks", self.uid)),
+            "the liked list failed to load",
+        )
+        .await?
+        .json()
+        .await
+        .context("unexpected liked-list response")?;
+
+        Ok(response
+            .result
+            .library
+            .tracks
+            .into_iter()
+            .map(|t| t.id)
+            .collect())
+    }
+
+    /// Track metadata by id, keeping the order of the input.
+    pub async fn tracks_meta(&self, ids: &[String]) -> Result<Vec<Track>> {
+        let mut tracks = Vec::with_capacity(ids.len());
+
+        for chunk in ids.chunks(META_CHUNK) {
+            let response: Envelope<Vec<RawTrack>> = send_retrying(
+                self.post("/tracks").form(&[("track-ids", chunk.join(","))]),
+                "track metadata did not arrive",
+            )
+            .await?
+            .json()
+            .await
+            .context("unexpected track-metadata response")?;
+
+            tracks.extend(response.result.into_iter().map(Track::from));
+        }
+
+        Ok(tracks)
+    }
+
+    /// A direct link to the track's audio file.
+    pub async fn download_info(&self, track_id: &str) -> Result<DownloadInfo> {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let transports = "raw";
+
+        // The signature is computed over a string with no commas between
+        // codecs, even though the query sends them comma-separated.
+        let mut mac = Hmac::<Sha256>::new_from_slice(SIGN_KEY)
+            .map_err(|e| anyhow!("cannot initialise hmac: {e}"))?;
+        mac.update(
+            format!(
+                "{ts}{track_id}{}{}{transports}",
+                self.quality,
+                self.codecs.replace(',', "")
+            )
+            .as_bytes(),
+        );
+        let signature = base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
+        // Yandex expects the signature without its last base64 character.
+        let signature = &signature[..signature.len().saturating_sub(1)];
+
+        let request = self
+            .get("/get-file-info")
+            .query(&[
+                ("ts", ts.to_string().as_str()),
+                ("trackId", track_id),
+                ("quality", &self.quality),
+                ("codecs", &self.codecs),
+                ("transports", transports),
+                ("sign", signature),
+            ]);
+
+        let response: Envelope<RawFileInfoResult> =
+            send_retrying(request, "no file link returned")
+                .await?
+                .json()
+                .await
+                .context("unexpected file-link response")?;
+
+        Ok(DownloadInfo {
+            url: response.result.download_info.url,
+            codec: response.result.download_info.codec,
+        })
+    }
+
+    pub async fn like(&self, track_id: &str) -> Result<()> {
+        send_retrying(
+            self.post(&format!("/users/{}/likes/tracks/add-multiple", self.uid))
+                .form(&[("track-ids", track_id)]),
+            "the like was not accepted",
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn unlike(&self, track_id: &str) -> Result<()> {
+        send_retrying(
+            self.post(&format!("/users/{}/likes/tracks/remove", self.uid))
+                .form(&[("track-ids", track_id)]),
+            "removing the like was not accepted",
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Tell the wave what is happening to a track. Failures here are not
+    /// fatal: playback continues, the station just serves worse picks.
+    pub async fn wave_feedback(&self, batch_id: Option<&str>, event: Feedback) -> Result<()> {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64();
+
+        let body = match &event {
+            Feedback::RadioStarted => serde_json::json!({
+                "type": "radioStarted",
+                "timestamp": timestamp,
+                "from": "tuiya",
+            }),
+            Feedback::TrackStarted { track_id } => serde_json::json!({
+                "type": "trackStarted",
+                "timestamp": timestamp,
+                "trackId": track_id,
+            }),
+            Feedback::TrackFinished {
+                track_id,
+                played_secs,
+            } => serde_json::json!({
+                "type": "trackFinished",
+                "timestamp": timestamp,
+                "trackId": track_id,
+                "totalPlayedSeconds": played_secs,
+            }),
+            Feedback::Skip {
+                track_id,
+                played_secs,
+            } => serde_json::json!({
+                "type": "skip",
+                "timestamp": timestamp,
+                "trackId": track_id,
+                "totalPlayedSeconds": played_secs,
+            }),
+        };
+
+        let mut request = self.post(&format!("/rotor/station/{WAVE_STATION}/feedback"));
+        if let Some(batch_id) = batch_id {
+            request = request.query(&[("batch-id", batch_id)]);
+        }
+
+        send_retrying(request.json(&body), "the wave rejected the event").await?;
+        Ok(())
+    }
+}
