@@ -5,6 +5,11 @@ edition = "2024"
 description = "A console player for Yandex Music"
 license = "MIT"
 
+[profile.release]
+# Stripping at link time keeps the macOS ad-hoc signature intact, which a
+# separate `strip` run after `lipo` would invalidate.
+strip = "symbols"
+
 [dependencies]
 anyhow = "1"
 base64 = "0.22"
