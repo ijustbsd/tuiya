@@ -93,6 +93,19 @@ impl Audio {
         Ok(Audio { tx, state })
     }
 
+    /// Takes the pending notice, if there is one.
+    ///
+    /// Reading clears it: these are one-off complaints, and the UI redraws
+    /// ten times a second, so a notice left in place would pin itself to the
+    /// status line and overwrite everything else said afterwards.
+    pub fn take_notice(&self) -> Option<String> {
+        self.state
+            .lock()
+            .expect("audio state mutex poisoned")
+            .notice
+            .take()
+    }
+
     pub fn state(&self) -> AudioState {
         self.state
             .lock()

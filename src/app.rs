@@ -426,7 +426,7 @@ impl App {
             return;
         }
 
-        if let Some(notice) = state.notice {
+        if let Some(notice) = self.audio.take_notice() {
             self.status = notice;
         }
 
