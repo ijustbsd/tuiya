@@ -3,14 +3,13 @@ name: CI
 on:
   push:
     branches: [master]
-    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
+  GIT_CLIFF_VERSION: "2.14.1"
 
-# A newer push to the same ref makes the running one pointless.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -26,8 +25,7 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      # Formatting compiles nothing, so it goes before the toolchain setup
-      # that only the lint step needs.
+      # Formatting compiles nothing, so it runs before anything is installed.
       - name: Check formatting
         run: cargo fmt --check
 
@@ -68,10 +66,69 @@ jobs:
       - name: Run tests
         run: cargo test --locked
 
+  version:
+    name: Decide the version
+    needs: [lint, test]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.calc.outputs.version }}
+      should_release: ${{ steps.calc.outputs.should_release }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # git-cliff reads the whole history and every tag to work out the bump.
+          fetch-depth: 0
+
+      - name: Install git-cliff
+        run: |
+          url="https://github.com/orhun/git-cliff/releases/download/v${GIT_CLIFF_VERSION}/git-cliff-${GIT_CLIFF_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          curl -sSfL "$url" | tar xz --strip-components=1 -C /usr/local/bin "git-cliff-${GIT_CLIFF_VERSION}/git-cliff"
+
+      - name: Work out the next version
+        id: calc
+        run: |
+          set -euo pipefail
+          latest="$(git tag --list 'v[0-9]*' --sort=-v:refname | head -n1)"
+          # With no tags at all git-cliff answers without the `v` prefix, so
+          # both sides are compared stripped and the prefix is added back later.
+          next="$(git-cliff --bumped-version)"
+          next="${next#v}"
+          latest="${latest#v}"
+
+          echo "version=$next" >> "$GITHUB_OUTPUT"
+          if [ "$next" = "$latest" ]; then
+            # Nothing but housekeeping since the last tag: cliff.toml skips
+            # those, so the bumped version comes back unchanged.
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            echo "No releasable commits since v$latest."
+          else
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+            echo "Releasing v$next (previous: ${latest:-none})."
+          fi
+
+      - name: Write the release notes
+        if: steps.calc.outputs.should_release == 'true'
+        run: |
+          set -euo pipefail
+          git-cliff --unreleased --strip all --output RELEASE_NOTES.md
+          # Possible when the only releasable commit was a revert, or on a
+          # first release cut over history that predates this convention.
+          if [ ! -s RELEASE_NOTES.md ]; then
+            echo "See the commit history for what changed." > RELEASE_NOTES.md
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: steps.calc.outputs.should_release == 'true'
+        with:
+          name: release-notes
+          path: RELEASE_NOTES.md
+          if-no-files-found: error
+
   build:
     name: Build ${{ matrix.target }}
-    needs: [lint, test]
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    needs: version
+    if: needs.version.outputs.should_release == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -83,6 +140,10 @@ jobs:
           - os: macos-15
             target: universal-apple-darwin
     runs-on: ${{ matrix.os }}
+    env:
+      # build.rs stamps this into the binary, so `tuiya --version` matches the
+      # release even though Cargo.toml was never touched.
+      TUIYA_VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -116,29 +177,43 @@ jobs:
             target/x86_64-apple-darwin/release/tuiya
           lipo -info target/release/tuiya
 
+      - name: Check the stamped version
+        run: ./target/release/tuiya --version
+
       - name: Package
-        run: tar -czf tuiya-${{ github.ref_name }}-${{ matrix.target }}.tar.gz -C target/release tuiya
+        run: tar -czf tuiya-${{ needs.version.outputs.version }}-${{ matrix.target }}.tar.gz -C target/release tuiya
 
       - uses: actions/upload-artifact@v4
         with:
           name: tuiya-${{ matrix.target }}
-          path: tuiya-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+          path: tuiya-${{ needs.version.outputs.version }}-${{ matrix.target }}.tar.gz
           if-no-files-found: error
 
   release:
-    name: Publish release
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    name: Publish v${{ needs.version.outputs.version }}
+    needs: [version, build]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
+          pattern: tuiya-*
           path: artifacts
           merge-multiple: true
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-notes
+          path: notes
+
+      # The tag is created here, at this commit. Nothing downstream waits on
+      # it, so the default GITHUB_TOKEN is enough — a bot-pushed tag cannot
+      # trigger another workflow, and this design never needs it to.
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: v${{ needs.version.outputs.version }}
+          name: v${{ needs.version.outputs.version }}
+          body_path: notes/RELEASE_NOTES.md
           files: artifacts/*.tar.gz
-          generate_release_notes: true
+          fail_on_unmatched_files: true

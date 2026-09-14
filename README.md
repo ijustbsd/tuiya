@@ -107,6 +107,30 @@ before its first sample. MP3 never reads there and skips the extra request.
 Playback begins once 256 KB has arrived, which keeps the decoder, running on
 the audio callback thread, from ever waiting on a read.
 
+## Releases
+
+Versions are not written down anywhere — they are worked out from commit
+messages. Pushing to `master` runs the lints and tests, decides the next
+version, builds binaries for Linux x86_64, Linux aarch64 and a universal
+macOS binary, and publishes a GitHub release with notes generated from the
+commits. `tuiya --version` reports what it was built from; between tags it
+says so, as in `0.2.0-3-gaecf094`.
+
+This only works if commit subjects follow
+[conventional commits](https://www.conventionalcommits.org):
+
+| Prefix | Effect |
+|---|---|
+| `fix:` | patch release |
+| `feat:` | minor release |
+| `feat!:` or a `BREAKING CHANGE:` footer | major release |
+| `chore:`, `docs:`, `ci:`, `refactor:`, `test:`, `style:` | no release |
+
+A push carrying only the last row lands on `master` without cutting a
+release, which is what `cliff.toml` is for. Nothing is ever committed back to
+the branch: the version lives in the tag, and `build.rs` stamps it into the
+binary, so `Cargo.toml` never needs touching.
+
 ## Known limitations
 
 - Seeking forward is held to the part that has downloaded, and says so in the

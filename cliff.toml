@@ -1,0 +1,32 @@
+# Version and release notes are derived from commit messages, so this file
+# decides what counts as a user-visible change. Anything not listed here is
+# housekeeping: it lands on master without cutting a release.
+
+[changelog]
+header = ""
+body = """
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group }}
+{% for commit in commits %}- {{ commit.message | upper_first }}
+{% endfor %}{% endfor %}
+"""
+trim = true
+
+[git]
+conventional_commits = true
+filter_unconventional = true
+commit_parsers = [
+  { message = "^feat", group = "Features" },
+  { message = "^fix", group = "Fixes" },
+  { message = "^perf", group = "Performance" },
+  { message = "^revert", group = "Reverts" },
+  # chore, docs, style, test, refactor, ci: no release, no notes.
+  { message = "^.*", skip = true },
+]
+filter_commits = true
+tag_pattern = "v[0-9].*"
+
+[bump]
+# Without this the very first version comes back as `0.1.0`, which does not
+# match tag_pattern above, and git-cliff refuses to answer at all.
+initial_tag = "v0.1.0"

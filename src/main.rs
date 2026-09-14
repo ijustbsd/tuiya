@@ -16,6 +16,14 @@ use crate::config::Config;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    if std::env::args()
+        .skip(1)
+        .any(|arg| arg == "--version" || arg == "-V")
+    {
+        println!("tuiya {}", env!("TUIYA_VERSION"));
+        return Ok(());
+    }
+
     let config = Config::load()?;
 
     let client = api::Client::new(&config.token, config.api_quality(), config.codecs())
