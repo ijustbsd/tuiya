@@ -15,6 +15,7 @@ use crate::api::models::{Track, WaveBatch};
 use crate::api::{Client, Feedback};
 use crate::audio::Audio;
 use crate::cache;
+use crate::stream::TrackSource;
 use crate::ui;
 
 /// Redraw rate. Second-level progress would be plenty, but a smooth bar
@@ -92,7 +93,7 @@ pub struct Playing {
 pub enum Message {
     Wave(Result<WaveBatch>),
     Likes(Result<(Vec<Track>, HashSet<String>)>),
-    Ready { epoch: u64, path: PathBuf },
+    Ready { epoch: u64, source: TrackSource },
     Failed { epoch: u64, error: String },
     LikeChanged { track_id: String, liked: bool },
     Notice(String),
@@ -113,8 +114,8 @@ pub struct App {
     pub shuffle: bool,
     pub volume: f32,
     pub loading_track: bool,
-    /// The playing track's file — never evicted when pruning the cache.
-    current_path: Option<PathBuf>,
+    /// Start playback before the download finishes.
+    streaming: bool,
 
     wave_batch_id: Option<String>,
     wave_requested: bool,
@@ -128,7 +129,13 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(api: Arc<Client>, audio: Audio, cache_dir: PathBuf, cache_limit_mb: u64) -> Self {
+    pub fn new(
+        api: Arc<Client>,
+        audio: Audio,
+        cache_dir: PathBuf,
+        cache_limit_mb: u64,
+        streaming: bool,
+    ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         let volume = audio.state().volume;
         App {
@@ -145,7 +152,7 @@ impl App {
             shuffle: false,
             volume,
             loading_track: false,
-            current_path: None,
+            streaming,
             wave_batch_id: None,
             wave_requested: false,
             wave_autoplay_pending: false,
@@ -227,15 +234,19 @@ impl App {
         });
     }
 
-    /// Download a track and report that it is ready to play.
+    /// Open a track and report that it is ready to play.
+    ///
+    /// With streaming on this comes back after a fraction of the file, so the
+    /// gap between pressing a key and hearing sound stays under a second.
     fn fetch_track(&self, track_id: String, epoch: u64) {
         let api = Arc::clone(&self.api);
         let tx = self.tx.clone();
         let cache_dir = self.cache_dir.clone();
+        let streaming = self.streaming;
         tokio::spawn(async move {
-            match cache::ensure_track(&api, &cache_dir, &track_id).await {
-                Ok(path) => {
-                    let _ = tx.send(Message::Ready { epoch, path });
+            match cache::open_track(api, cache_dir, &track_id, streaming).await {
+                Ok(source) => {
+                    let _ = tx.send(Message::Ready { epoch, source });
                 }
                 Err(e) => {
                     let _ = tx.send(Message::Failed {
@@ -415,6 +426,10 @@ impl App {
             return;
         }
 
+        if let Some(notice) = state.notice {
+            self.status = notice;
+        }
+
         if let Some(error) = state.error {
             self.status = format!("Cannot play \"{}\": {error}", playing.track.label());
             self.loading_track = false;
@@ -439,7 +454,7 @@ impl App {
             let _ = cache::prune(
                 &self.cache_dir,
                 self.cache_limit,
-                self.current_path.as_deref(),
+                Some(playing.track.id.as_str()),
             );
         }
 
@@ -489,10 +504,11 @@ impl App {
                 self.likes.placeholder = format!("Liked tracks failed to load: {reason}");
                 self.status = format!("Liked tracks failed to load: {reason}");
             }
-            Message::Ready { epoch, path } => {
-                if self.playing.as_ref().is_some_and(|p| p.epoch == epoch) {
-                    self.current_path = Some(path.clone());
-                    self.audio.play(path, epoch);
+            Message::Ready { epoch, source } => {
+                if let Some(playing) = self.playing.as_ref() {
+                    if playing.epoch == epoch {
+                        self.audio.play(source, epoch, playing.track.duration);
+                    }
                 }
             }
             Message::Failed { epoch, error } => {

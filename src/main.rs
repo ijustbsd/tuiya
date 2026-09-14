@@ -3,6 +3,7 @@ mod app;
 mod audio;
 mod cache;
 mod config;
+mod stream;
 mod ui;
 
 use std::sync::Arc;
@@ -26,7 +27,13 @@ async fn main() -> Result<()> {
         .with_context(|| format!("cannot create the cache at {}", cache_dir.display()))?;
 
     let audio = Audio::new(1.0)?;
-    let app = App::new(Arc::new(client), audio, cache_dir, config.cache_limit_mb);
+    let app = App::new(
+        Arc::new(client),
+        audio,
+        cache_dir,
+        config.cache_limit_mb,
+        config.streaming,
+    );
 
     let terminal = ratatui::init();
     let result = app.run(terminal).await;

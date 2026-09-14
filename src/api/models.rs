@@ -152,6 +152,16 @@ pub struct DownloadInfo {
 }
 
 impl DownloadInfo {
+    /// Whether the container is probed from its end.
+    ///
+    /// ISO-BMFF (everything in an MP4 box) makes symphonia jump past `mdat`
+    /// to look for trailing atoms, so the tail has to be fetched separately
+    /// before the first sample can be decoded. MP3 never looks there. Unknown
+    /// codecs get the tail too, on the assumption that it might be needed.
+    pub fn probes_tail(&self) -> bool {
+        !matches!(self.extension(), "mp3")
+    }
+
     /// Extension to use in the cache. Unknown codecs are stored as `.bin` —
     /// symphonia sniffs the real format from the content anyway.
     pub fn extension(&self) -> &'static str {

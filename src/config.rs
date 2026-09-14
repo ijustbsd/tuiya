@@ -16,6 +16,10 @@ pub struct Config {
     /// Cache size limit, in megabytes.
     #[serde(default = "default_cache_limit")]
     pub cache_limit_mb: u64,
+    /// Start playing while the track is still downloading. Turn this off to
+    /// wait for the whole file, the way older versions behaved.
+    #[serde(default = "default_streaming")]
+    pub streaming: bool,
 }
 
 fn default_quality() -> String {
@@ -24,6 +28,10 @@ fn default_quality() -> String {
 
 fn default_cache_limit() -> u64 {
     4096
+}
+
+fn default_streaming() -> bool {
+    true
 }
 
 impl Config {
@@ -40,6 +48,7 @@ impl Config {
                 token: String::new(),
                 quality: default_quality(),
                 cache_limit_mb: default_cache_limit(),
+                streaming: default_streaming(),
             }
         };
 

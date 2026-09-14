@@ -23,8 +23,11 @@ space pause · n next · b prev · ←/→ ±5s · l like · Tab switch · q qui
   you actually listen to.
 - **Liked tracks** — the whole liked list with metadata, in order or shuffled.
 - Like and unlike from inside the player.
-- On-disk cache: the next track is fetched ahead of time, so switching is
-  instant. Old files are evicted once the cache outgrows its limit.
+- Streaming playback: a track starts within a second or two instead of after
+  its whole file has arrived.
+- On-disk cache: a streamed track is kept once it finishes, and the next track
+  is fetched ahead of time, so switching is instant. Old files are evicted once
+  the cache outgrows its limit.
 - `lossless` quality (FLAC in MP4), falling back to MP3 320 for tracks that
   have no lossless version.
 
@@ -45,6 +48,7 @@ cargo build --release
 token = "y0_..."         # Yandex Music OAuth token
 quality = "lossless"     # or "high" for MP3 320 only
 cache_limit_mb = 4096    # cache limit for ~/.cache/tuiya
+streaming = true         # false waits for the whole file before playing
 ```
 
 `TUIYA_TOKEN` overrides the token from the config file.
@@ -78,7 +82,8 @@ and out of version control.
 
 ```
 api/      calls to api.music.yandex.net: wave, likes, signed file links
-cache.rs  downloads into ~/.cache/tuiya, plus eviction by limit
+stream.rs a partially downloaded track that can be read and seeked
+cache.rs  opens tracks for playback, downloads into ~/.cache/tuiya, eviction
 audio.rs  a dedicated OS thread running rodio: decoding and playback
 app.rs    state, queues, keyboard, background tasks
 ui.rs     ratatui rendering
@@ -93,11 +98,21 @@ to the UI as a message, so loading a 400-track list never blocks rendering.
 Playback lives on its own OS thread because stopping rodio can block, and in
 the render loop that would be visible.
 
+Streaming keeps the download in memory and hands the decoder a reader over it.
+Two regions are filled at once: the body arrives sequentially from the start,
+while a second range request fetches the last 256 KB. The tail matters because
+symphonia probes MP4 from the end — it jumps past `mdat` looking for trailing
+atoms — so without it every lossless track would have to download in full
+before its first sample. MP3 never reads there and skips the extra request.
+Playback begins once 256 KB has arrived, which keeps the decoder, running on
+the audio callback thread, from ever waiting on a read.
+
 ## Known limitations
 
-- The first track only starts once its file has downloaded in full — 5 to 15
-  seconds depending on your connection. After that switching is instant,
-  because the next track is fetched in advance. There is no true streaming
-  playback yet.
+- Seeking forward is held to the part that has downloaded, and says so in the
+  status line. Reading past it would block the audio thread and stall playback
+  outright, which is worse than a short seek.
+- Holding down the seek key drops most of the presses: rodio performs one seek
+  at a time and a new request replaces the pending one.
 - No dislike command for the wave.
 - No cover art, lyrics or search.
