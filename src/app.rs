@@ -505,14 +505,14 @@ impl App {
                 self.status = format!("Liked tracks failed to load: {reason}");
             }
             Message::Ready { epoch, source } => {
-                if let Some(playing) = self.playing.as_ref() {
-                    if playing.epoch == epoch {
-                        self.audio.play(source, epoch, playing.track.duration);
-                    }
+                if let Some(playing) = self.playing.as_ref()
+                    && playing.epoch == epoch
+                {
+                    self.audio.play(source, epoch, playing.track.duration);
                 }
             }
             Message::Failed { epoch, error } => {
-                let stale = !self.playing.as_ref().is_some_and(|p| p.epoch == epoch);
+                let stale = self.playing.as_ref().is_none_or(|p| p.epoch != epoch);
                 if stale {
                     return;
                 }
@@ -605,11 +605,12 @@ impl App {
 
     /// Likes the playing track, or the highlighted one if nothing plays.
     fn toggle_like(&mut self) {
-        let track = self
-            .playing
-            .as_ref()
-            .map(|p| p.track.clone())
-            .or_else(|| self.queue(self.tab).tracks.get(self.queue(self.tab).cursor).cloned());
+        let track = self.playing.as_ref().map(|p| p.track.clone()).or_else(|| {
+            self.queue(self.tab)
+                .tracks
+                .get(self.queue(self.tab).cursor)
+                .cloned()
+        });
 
         let Some(track) = track else { return };
         let liked = self.liked.contains(&track.id);

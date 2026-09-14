@@ -101,7 +101,11 @@ fn render_list(frame: &mut Frame, area: Rect, app: &mut App) {
     .block(block)
     .column_spacing(1)
     .highlight_spacing(HighlightSpacing::Always)
-    .row_highlight_style(Style::new().bg(Color::DarkGray).add_modifier(Modifier::BOLD));
+    .row_highlight_style(
+        Style::new()
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+    );
 
     let queue = app.queue_mut(tab);
     queue.state.select(Some(queue.cursor));
@@ -141,7 +145,10 @@ fn render_player(frame: &mut Frame, area: Rect, app: &App) {
 
     let now = Line::from(vec![
         Span::styled(format!("{icon} "), Style::new().fg(ACCENT)),
-        Span::styled(playing.track.artists.clone(), Style::new().fg(ACCENT).bold()),
+        Span::styled(
+            playing.track.artists.clone(),
+            Style::new().fg(ACCENT).bold(),
+        ),
         Span::raw(" — "),
         Span::styled(playing.track.title.clone(), Style::new().bold()),
         heart,

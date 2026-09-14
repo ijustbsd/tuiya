@@ -1,4 +1,4 @@
-use std::sync::mpsc::{Receiver, Sender, RecvTimeoutError, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -72,15 +72,17 @@ impl Audio {
         let thread_state = Arc::clone(&state);
         std::thread::Builder::new()
             .name("tuiya-audio".to_string())
-            .spawn(move || match rodio::DeviceSinkBuilder::open_default_sink() {
-                Ok(sink) => {
-                    let _ = ready_tx.send(Ok(()));
-                    run(sink, rx, thread_state, volume);
-                }
-                Err(e) => {
-                    let _ = ready_tx.send(Err(format!("{e}")));
-                }
-            })
+            .spawn(
+                move || match rodio::DeviceSinkBuilder::open_default_sink() {
+                    Ok(sink) => {
+                        let _ = ready_tx.send(Ok(()));
+                        run(sink, rx, thread_state, volume);
+                    }
+                    Err(e) => {
+                        let _ = ready_tx.send(Err(format!("{e}")));
+                    }
+                },
+            )
             .context("cannot start the audio thread")?;
 
         ready_rx
@@ -92,7 +94,10 @@ impl Audio {
     }
 
     pub fn state(&self) -> AudioState {
-        self.state.lock().expect("audio state mutex poisoned").clone()
+        self.state
+            .lock()
+            .expect("audio state mutex poisoned")
+            .clone()
     }
 
     pub fn play(&self, source: TrackSource, epoch: u64, duration: Duration) {
@@ -197,9 +202,7 @@ fn run(sink: MixerDeviceSink, rx: Receiver<Command>, state: Arc<Mutex<AudioState
                     let wanted = (current + delta as f64).max(0.0);
                     let (target, clamped) = clamp_seek(wanted, loaded.as_ref());
 
-                    let message = if let Err(e) =
-                        player.try_seek(Duration::from_secs_f64(target))
-                    {
+                    let message = if let Err(e) = player.try_seek(Duration::from_secs_f64(target)) {
                         Some(format!("seek failed: {e}"))
                     } else if clamped {
                         Some("seek limited to the downloaded part".to_string())

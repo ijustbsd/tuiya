@@ -37,8 +37,8 @@ async fn send_retrying(request: reqwest::RequestBuilder, what: &str) -> Result<r
         match attempt_request.send().await {
             Ok(response) => {
                 let status = response.status();
-                let retriable = status == reqwest::StatusCode::TOO_MANY_REQUESTS
-                    || status.is_server_error();
+                let retriable =
+                    status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error();
                 if !retriable {
                     return response
                         .error_for_status()
@@ -114,7 +114,10 @@ impl Client {
     fn get(&self, path: &str) -> reqwest::RequestBuilder {
         self.http
             .get(format!("{API}{path}"))
-            .header(reqwest::header::AUTHORIZATION, format!("OAuth {}", self.token))
+            .header(
+                reqwest::header::AUTHORIZATION,
+                format!("OAuth {}", self.token),
+            )
             .header("X-Yandex-Music-Client", CLIENT_HEADER)
     }
 
@@ -126,7 +129,10 @@ impl Client {
     fn post(&self, path: &str) -> reqwest::RequestBuilder {
         self.http
             .post(format!("{API}{path}"))
-            .header(reqwest::header::AUTHORIZATION, format!("OAuth {}", self.token))
+            .header(
+                reqwest::header::AUTHORIZATION,
+                format!("OAuth {}", self.token),
+            )
             .header("X-Yandex-Music-Client", CLIENT_HEADER)
     }
 
@@ -142,11 +148,12 @@ impl Client {
             request = request.query(&[("queue", after)]);
         }
 
-        let response: Envelope<RawWaveResult> = send_retrying(request, "the wave did not return tracks")
-            .await?
-            .json()
-            .await
-            .context("unexpected wave response")?;
+        let response: Envelope<RawWaveResult> =
+            send_retrying(request, "the wave did not return tracks")
+                .await?
+                .json()
+                .await
+                .context("unexpected wave response")?;
 
         let result = response.result;
         // The `liked` flag in the station response is unreliable, so hearts
@@ -223,27 +230,25 @@ impl Client {
             )
             .as_bytes(),
         );
-        let signature = base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
+        let signature =
+            base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
         // Yandex expects the signature without its last base64 character.
         let signature = &signature[..signature.len().saturating_sub(1)];
 
-        let request = self
-            .get("/get-file-info")
-            .query(&[
-                ("ts", ts.to_string().as_str()),
-                ("trackId", track_id),
-                ("quality", &self.quality),
-                ("codecs", &self.codecs),
-                ("transports", transports),
-                ("sign", signature),
-            ]);
+        let request = self.get("/get-file-info").query(&[
+            ("ts", ts.to_string().as_str()),
+            ("trackId", track_id),
+            ("quality", &self.quality),
+            ("codecs", &self.codecs),
+            ("transports", transports),
+            ("sign", signature),
+        ]);
 
-        let response: Envelope<RawFileInfoResult> =
-            send_retrying(request, "no file link returned")
-                .await?
-                .json()
-                .await
-                .context("unexpected file-link response")?;
+        let response: Envelope<RawFileInfoResult> = send_retrying(request, "no file link returned")
+            .await?
+            .json()
+            .await
+            .context("unexpected file-link response")?;
 
         Ok(DownloadInfo {
             url: response.result.download_info.url,
