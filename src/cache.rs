@@ -19,7 +19,7 @@ pub async fn open_track(
     track_id: &str,
     streaming: bool,
 ) -> Result<TrackSource> {
-    if let Some(path) = find_cached(&cache_dir, track_id) {
+    if let Some(path) = find_cached(&cache_dir, track_id, client.quality()) {
         return TrackSource::open_file(&path)
             .with_context(|| format!("cannot open {}", path.display()));
     }
@@ -40,7 +40,7 @@ async fn stream_track(
     track_id: &str,
 ) -> Result<TrackSource> {
     let info = client.download_info(track_id).await?;
-    let (target, partial) = cache_paths(&cache_dir, track_id, info.extension());
+    let (target, partial) = cache_paths(&cache_dir, track_id, info.extension(), client.quality());
 
     let response = client
         .http_get(&info.url)
@@ -134,7 +134,7 @@ async fn fetch_tail(client: &Client, url: &str, offset: u64) -> Result<Vec<u8>> 
 /// Used to fetch the next track ahead of time, where latency does not matter
 /// and having the finished file on disk does.
 pub async fn ensure_track(client: &Client, cache_dir: &Path, track_id: &str) -> Result<PathBuf> {
-    if let Some(existing) = find_cached(cache_dir, track_id) {
+    if let Some(existing) = find_cached(cache_dir, track_id, client.quality()) {
         return Ok(existing);
     }
 
@@ -143,7 +143,7 @@ pub async fn ensure_track(client: &Client, cache_dir: &Path, track_id: &str) -> 
         .with_context(|| format!("cannot create the cache at {}", cache_dir.display()))?;
 
     let info = client.download_info(track_id).await?;
-    let (target, partial) = cache_paths(cache_dir, track_id, info.extension());
+    let (target, partial) = cache_paths(cache_dir, track_id, info.extension(), client.quality());
 
     let response = client
         .http_get(&info.url)
@@ -159,10 +159,15 @@ pub async fn ensure_track(client: &Client, cache_dir: &Path, track_id: &str) -> 
 
 /// The final name and the `.part` name a download writes to first, so an
 /// interrupted transfer never leaves behind something that looks complete.
-fn cache_paths(cache_dir: &Path, track_id: &str, extension: &str) -> (PathBuf, PathBuf) {
+fn cache_paths(
+    cache_dir: &Path,
+    track_id: &str,
+    extension: &str,
+    quality: &str,
+) -> (PathBuf, PathBuf) {
     (
-        cache_dir.join(format!("{track_id}.{extension}")),
-        cache_dir.join(format!("{track_id}.part")),
+        cache_dir.join(format!("{track_id}.{quality}.{extension}")),
+        cache_dir.join(format!("{track_id}.{quality}.part")),
     )
 }
 
@@ -204,22 +209,36 @@ fn persist(data: &[u8], target: &Path, partial: &Path) -> Result<()> {
     Ok(())
 }
 
-fn find_cached(cache_dir: &Path, track_id: &str) -> Option<PathBuf> {
+fn find_cached(cache_dir: &Path, track_id: &str, quality: &str) -> Option<PathBuf> {
     let entries = std::fs::read_dir(cache_dir).ok()?;
+    let prefix = format!("{track_id}.{quality}.");
+    let mut legacy = None;
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().is_some_and(|ext| ext == "part") {
+        let extension = path.extension().and_then(|ext| ext.to_str());
+        if extension == Some("part") || !entry.metadata().is_ok_and(|m| m.is_file() && m.len() > 0)
+        {
             continue;
         }
-        let matches = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .is_some_and(|stem| stem == track_id);
-        if matches && entry.metadata().is_ok_and(|m| m.len() > 0) {
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(&prefix))
+        {
             return Some(path);
         }
+        // Older releases stored tracks without a quality marker. Reuse only
+        // formats that are unambiguous for the selected quality.
+        if path.file_stem().and_then(|stem| stem.to_str()) == Some(track_id)
+            && matches!(
+                (quality, extension),
+                ("high", Some("mp3")) | ("lossless", Some("mp4" | "flac"))
+            )
+        {
+            legacy = Some(path);
+        }
     }
-    None
+    legacy
 }
 
 /// Drops least-recently-used files until the cache fits under the limit.
@@ -234,7 +253,7 @@ pub fn prune(cache_dir: &Path, limit_bytes: u64, keep: Option<&str>) -> Result<(
     for entry in entries.flatten() {
         let path = entry.path();
         let Ok(meta) = entry.metadata() else { continue };
-        if !meta.is_file() {
+        if !meta.is_file() || path.extension().is_some_and(|ext| ext == "part") {
             continue;
         }
         let accessed = meta.accessed().or_else(|_| meta.modified())?;
@@ -251,8 +270,11 @@ pub fn prune(cache_dir: &Path, limit_bytes: u64, keep: Option<&str>) -> Result<(
         if total <= limit_bytes {
             break;
         }
-        let stem = path.file_stem().and_then(|s| s.to_str());
-        if keep.is_some() && stem == keep {
+        if keep.is_some_and(|id| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(&format!("{id}.")))
+        }) {
             continue;
         }
         if std::fs::remove_file(&path).is_ok() {
@@ -261,4 +283,64 @@ pub fn prune(cache_dir: &Path, limit_bytes: u64, keep: Option<&str>) -> Result<(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn switching_quality_uses_its_own_cache_and_reuses_compatible_legacy_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("42.high.mp3"), b"high").unwrap();
+        std::fs::write(root.join("42.mp3"), b"legacy").unwrap();
+        std::fs::write(root.join("42.lossless.part"), b"unfinished").unwrap();
+        assert_eq!(
+            find_cached(root, "42", "high"),
+            Some(root.join("42.high.mp3"))
+        );
+        assert!(find_cached(root, "42", "lossless").is_none());
+        std::fs::write(root.join("42.mp4"), b"legacy-lossless").unwrap();
+        assert_eq!(
+            find_cached(root, "42", "lossless"),
+            Some(root.join("42.mp4"))
+        );
+        std::fs::write(root.join("42.lossless.mp4"), b"lossless").unwrap();
+        assert_eq!(
+            find_cached(root, "42", "lossless"),
+            Some(root.join("42.lossless.mp4"))
+        );
+        let (_, high_partial) = cache_paths(root, "42", "mp3", "high");
+        let (_, lossless_partial) = cache_paths(root, "42", "mp4", "lossless");
+        assert_ne!(high_partial, lossless_partial);
+    }
+
+    #[test]
+    fn trimming_keeps_the_playing_track_and_in_progress_downloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for filename in [
+            "42.high.mp3",
+            "42.lossless.mp4",
+            "42.mp3",
+            "43.high.mp3",
+            "421.high.mp3",
+            "43.lossless.part",
+        ] {
+            std::fs::write(root.join(filename), b"content").unwrap();
+        }
+        prune(root, 0, Some("42")).unwrap();
+        for filename in [
+            "42.high.mp3",
+            "42.lossless.mp4",
+            "42.mp3",
+            "43.lossless.part",
+        ] {
+            assert!(root.join(filename).exists());
+        }
+        for filename in ["43.high.mp3", "421.high.mp3"] {
+            assert!(!root.join(filename).exists());
+        }
+    }
 }

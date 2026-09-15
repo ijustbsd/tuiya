@@ -6,6 +6,7 @@ mod config;
 mod login;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod media;
+mod settings;
 mod stream;
 mod ui;
 mod update;
@@ -59,14 +60,8 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(&cache_dir)
         .with_context(|| format!("cannot create the cache at {}", cache_dir.display()))?;
 
-    let audio = Audio::new(1.0)?;
-    let app = App::new(
-        Arc::new(client),
-        audio,
-        cache_dir,
-        config.cache_limit_mb,
-        config.streaming,
-    );
+    let audio = Audio::new(config.volume)?;
+    let app = App::new(Arc::new(client), audio, cache_dir, config.preferences());
 
     let terminal = ratatui::init();
     let result = app.run(terminal).await;

@@ -87,6 +87,16 @@ cargo build --release --locked
 
 ## Configuration
 
+Press `o` in the player to open Settings. Use `↑`/`↓` or `Tab` to
+select a field and `←`/`→` to change it. For the cache size, type a number in
+MB. Press `Ctrl-S` or select **Save changes** and press `Enter` to save;
+`Esc` cancels edits.
+
+Quality and streaming changes apply to subsequent track loads. Saving volume
+changes playback immediately and sets the startup volume. Saving the cache
+size trims completed cached tracks; the playing track and ongoing downloads
+are kept. Login credentials stay in the config when preferences are saved.
+
 On the first run, tuiya opens a browser sign-in. Allow access to Yandex Music,
 then copy the full address after the redirect and paste it into the terminal.
 Input is hidden. tuiya extracts and checks the token, then saves it with mode
@@ -108,6 +118,7 @@ token = "y0_..."         # Yandex Music OAuth token
 quality = "lossless"     # or "high" for MP3 320 only
 cache_limit_mb = 4096    # cache limit for ~/.cache/tuiya
 streaming = true         # false waits for the whole file before playing
+volume = 1.0             # startup volume: 0.0–2.0 (100% = 1.0)
 ```
 
 `TUIYA_TOKEN` overrides the token from the config file.
@@ -134,6 +145,7 @@ and out of version control.
 | `l` | like the playing track (or the highlighted one if nothing plays) |
 | `s` | shuffle liked tracks |
 | `r` | reload the liked list |
+| `o` | open settings |
 | `q`, `Esc`, `Ctrl-C` | quit |
 
 On Linux, system media controls are registered automatically on the session
@@ -153,6 +165,7 @@ which active player receives media commands.
 
 ```
 api/      calls to api.music.yandex.net: wave, likes, signed file links
+settings.rs preferences dialog, keyboard editing and validation
 stream.rs a partially downloaded track that can be read and seeked
 cache.rs  opens tracks for playback, downloads into ~/.cache/tuiya, eviction
 audio.rs  a dedicated OS thread running rodio: decoding and playback

@@ -15,6 +15,8 @@ use crate::api::models::{Track, WaveBatch};
 use crate::api::{Client, Feedback};
 use crate::audio::Audio;
 use crate::cache;
+use crate::config::{Config, Preferences};
+use crate::settings::{Action, Settings};
 use crate::stream::TrackSource;
 use crate::ui;
 
@@ -127,8 +129,9 @@ pub struct App {
     pub loading_track: bool,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pause_on_load: bool,
-    /// Start playback before the download finishes.
-    streaming: bool,
+    /// Preferences last saved through the settings dialog.
+    preferences: Preferences,
+    pub settings: Option<Settings>,
 
     wave_batch_id: Option<String>,
     wave_requested: bool,
@@ -146,8 +149,7 @@ impl App {
         api: Arc<Client>,
         audio: Audio,
         cache_dir: PathBuf,
-        cache_limit_mb: u64,
-        streaming: bool,
+        preferences: Preferences,
     ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         let volume = audio.state().volume;
@@ -155,7 +157,7 @@ impl App {
             api,
             audio,
             cache_dir,
-            cache_limit: cache_limit_mb.saturating_mul(1024 * 1024),
+            cache_limit: preferences.cache_limit_mb.saturating_mul(1024 * 1024),
             tab: Tab::Wave,
             wave: Queue::default(),
             likes: Queue::default(),
@@ -167,7 +169,8 @@ impl App {
             loading_track: false,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             pause_on_load: false,
-            streaming,
+            preferences,
+            settings: None,
             wave_batch_id: None,
             wave_requested: false,
             wave_autoplay_pending: false,
@@ -269,7 +272,7 @@ impl App {
         let api = Arc::clone(&self.api);
         let tx = self.tx.clone();
         let cache_dir = self.cache_dir.clone();
-        let streaming = self.streaming;
+        let streaming = self.preferences.streaming;
         tokio::spawn(async move {
             match cache::open_track(api, cache_dir, &track_id, streaming).await {
                 Ok(source) => {
@@ -592,7 +595,21 @@ impl App {
             return;
         }
 
+        if let Some(settings) = &mut self.settings {
+            match settings.on_key(key) {
+                Action::Cancel => self.settings = None,
+                Action::Save => self.save_settings(),
+                Action::None => {}
+            }
+            return;
+        }
+
         match key.code {
+            KeyCode::Char('o') => {
+                let mut preferences = self.preferences.clone();
+                preferences.volume = self.volume;
+                self.settings = Some(Settings::new(preferences));
+            }
             KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
             KeyCode::Tab | KeyCode::BackTab => self.switch_tab(),
             KeyCode::Char('1') => self.tab = Tab::Wave,
@@ -641,6 +658,42 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    fn save_settings(&mut self) {
+        let values = self.settings.as_ref().expect("settings are open").values();
+        let result = values.and_then(|values| {
+            Config::save_preferences(&values)?;
+            Ok(values)
+        });
+        let values = match result {
+            Ok(values) => values,
+            Err(error) => {
+                self.settings.as_mut().expect("settings are open").error =
+                    Some(format!("{error:#}"));
+                return;
+            }
+        };
+        let quality_changed = self.preferences.quality != values.quality;
+        Arc::make_mut(&mut self.api).set_quality(&values.quality);
+        self.cache_limit = values.cache_limit_mb * 1024 * 1024;
+        self.volume = values.volume;
+        self.audio.set_volume(values.volume);
+        self.preferences = values;
+        self.settings = None;
+        self.status = "Settings saved".into();
+        if quality_changed && let Some(playing) = &self.playing {
+            self.prefetch(playing.tab, playing.index);
+        }
+        let directory = self.cache_dir.clone();
+        let limit = self.cache_limit;
+        let keep = self.playing.as_ref().map(|p| p.track.id.clone());
+        let events = self.tx.clone();
+        tokio::task::spawn_blocking(move || {
+            if let Err(error) = cache::prune(&directory, limit, keep.as_deref()) {
+                let _ = events.send(Message::Notice(format!("Cannot trim the cache: {error}")));
+            }
+        });
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]

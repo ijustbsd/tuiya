@@ -4,9 +4,12 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, HighlightSpacing, Paragraph, Row, Table};
+use ratatui::widgets::{
+    Block, Borders, Cell, Clear, HighlightSpacing, Paragraph, Row, Table, Wrap,
+};
 
 use crate::app::{App, Tab};
+use crate::settings::Settings;
 
 const ACCENT: Color = Color::Yellow;
 
@@ -23,6 +26,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     render_list(frame, list, app);
     render_player(frame, player, app);
     render_status(frame, status, app);
+    if let Some(settings) = &mut app.settings {
+        render_settings(frame, settings);
+    }
 }
 
 fn render_header(frame: &mut Frame, area: Rect, app: &App) {
@@ -36,6 +42,10 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
         spans.push(Span::styled(format!(" {} ", tab.title()), style));
         spans.push(Span::raw(" "));
     }
+    spans.push(Span::styled(
+        " o settings ",
+        Style::new().fg(Color::DarkGray),
+    ));
     frame.render_widget(Line::from(spans), area);
 }
 
@@ -183,7 +193,7 @@ fn render_player(frame: &mut Frame, area: Rect, app: &App) {
     ]);
 
     let keys = Line::from(Span::styled(
-        "space pause · n next · b prev · ←/→ ±5s · +/- volume · l like · s shuffle · Tab switch · r refresh · q quit",
+        "space pause · n next · b prev · ←/→ ±5s · +/- volume · l like · s shuffle · Tab switch · r refresh · o settings · q quit",
         Style::new().fg(Color::DarkGray),
     ));
 
@@ -199,6 +209,98 @@ fn render_player(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(keys, line_keys);
 }
 
+fn render_settings(frame: &mut Frame, settings: &mut Settings) {
+    let area = frame.area();
+    let width = area.width.min(70);
+    let height = area.height.min(17);
+    let popup = Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    );
+    frame.render_widget(Clear, popup);
+    let block = Block::bordered()
+        .title(" Settings ")
+        .border_style(Style::new().fg(ACCENT))
+        .style(Style::new().bg(Color::Black));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let [intro, table, help, error, footer] = Layout::vertical([
+        Constraint::Length(if inner.height >= 10 { 2 } else { 0 }),
+        Constraint::Min(0),
+        Constraint::Length(if inner.height >= 10 { 3 } else { 0 }),
+        Constraint::Length(if settings.error.is_some() { 2 } else { 0 }),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    frame.render_widget(
+        Paragraph::new("  Choose a setting, then change its value.")
+            .style(Style::new().fg(Color::DarkGray)),
+        intro,
+    );
+
+    let rows = [
+        (
+            "Audio quality",
+            if settings.draft.quality == "high" {
+                "◀ MP3 320 ▶".into()
+            } else {
+                "◀ Lossless ▶".into()
+            },
+        ),
+        (
+            "Streaming",
+            if settings.draft.streaming {
+                "◀ On ▶".into()
+            } else {
+                "◀ Off ▶".into()
+            },
+        ),
+        ("Cache size", format!("{} MB", settings.cache_input)),
+        (
+            "Volume",
+            format!("◀ {}% ▶", (settings.draft.volume * 100.0).round() as u16),
+        ),
+        ("Save changes", "Enter".into()),
+    ]
+    .into_iter()
+    .map(|(label, value)| Row::new([Cell::from(format!(" {label}")), Cell::from(value)]));
+    settings.table.select(Some(settings.selected));
+    frame.render_stateful_widget(
+        Table::new(rows, [Constraint::Percentage(40), Constraint::Fill(1)])
+            .highlight_spacing(HighlightSpacing::Always)
+            .highlight_symbol("› ")
+            .row_highlight_style(Style::new().fg(Color::Black).bg(ACCENT).bold()),
+        table,
+        &mut settings.table,
+    );
+    frame.render_widget(
+        Paragraph::new(settings.help())
+            .wrap(Wrap { trim: true })
+            .style(Style::new().fg(Color::DarkGray)),
+        help,
+    );
+    if let Some(message) = &settings.error {
+        frame.render_widget(
+            Paragraph::new(message.as_str())
+                .wrap(Wrap { trim: true })
+                .style(Style::new().fg(Color::Red)),
+            error,
+        );
+    }
+    frame.render_widget(
+        Paragraph::new(if inner.width >= 55 {
+            "↑/↓ Tab select · ←/→ change · Ctrl-S save · Esc cancel"
+        } else {
+            "↑/↓ select · Ctrl-S save · Esc cancel"
+        })
+        .style(Style::new().fg(ACCENT)),
+        footer,
+    );
+}
+
 fn render_status(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(
         Line::from(Span::styled(
@@ -212,4 +314,55 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
 fn format_duration(duration: Duration) -> String {
     let total = duration.as_secs();
     format!("{:02}:{:02}", total / 60, total % 60)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Preferences;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    #[test]
+    fn settings_remain_usable_in_small_terminals_and_show_save_errors() {
+        for (width, height) in [(80, 24), (40, 10), (20, 6), (1, 1)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            let mut settings = Settings::new(Preferences {
+                quality: "lossless".into(),
+                cache_limit_mb: 4096,
+                streaming: true,
+                volume: 1.0,
+            });
+            settings.selected = 4;
+            terminal
+                .draw(|frame| render_settings(frame, &mut settings))
+                .unwrap();
+            if width >= 40 {
+                let rendered = terminal
+                    .backend()
+                    .buffer()
+                    .content()
+                    .iter()
+                    .map(|cell| cell.symbol())
+                    .collect::<String>();
+                assert!(rendered.contains("Settings"));
+                assert!(rendered.contains("Save changes"));
+                assert!(rendered.contains("Esc cancel"));
+            }
+            settings.error = Some("Cannot write config".into());
+            terminal
+                .draw(|frame| render_settings(frame, &mut settings))
+                .unwrap();
+            if width == 80 {
+                let rendered = terminal
+                    .backend()
+                    .buffer()
+                    .content()
+                    .iter()
+                    .map(|cell| cell.symbol())
+                    .collect::<String>();
+                assert!(rendered.contains("Cannot write config"));
+            }
+        }
+    }
 }

@@ -67,6 +67,7 @@ pub enum Feedback {
     Skip { track_id: String, played_secs: f64 },
 }
 
+#[derive(Clone)]
 pub struct Client {
     http: reqwest::Client,
     token: String,
@@ -77,6 +78,16 @@ pub struct Client {
 }
 
 impl Client {
+    pub fn quality(&self) -> &str {
+        &self.quality
+    }
+
+    pub fn set_quality(&mut self, quality: &str) {
+        let high = matches!(quality, "high" | "mp3");
+        self.quality = if high { "high" } else { "lossless" }.into();
+        self.codecs = if high { "mp3" } else { "flac-mp4,mp3" }.into();
+    }
+
     pub async fn new(token: &str, quality: &str, codecs: &str) -> Result<Self> {
         let http = reqwest::Client::builder()
             .user_agent("tuiya/0.1")
