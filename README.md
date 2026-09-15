@@ -87,6 +87,20 @@ cargo build --release --locked
 
 ## Configuration
 
+On the first run, tuiya opens a browser sign-in. Allow access to Yandex Music,
+then copy the full address after the redirect and paste it into the terminal.
+Input is hidden. tuiya extracts and checks the token, then saves it with mode
+`600`. You can also paste an OAuth token directly.
+
+To sign in again or switch accounts:
+
+```sh
+tuiya login
+```
+
+If the browser does not open automatically, open the link printed in the
+terminal. Press `Ctrl-C` to cancel. Login keeps your existing settings.
+
 `~/.config/tuiya/config.toml`:
 
 ```toml
@@ -98,9 +112,8 @@ streaming = true         # false waits for the whole file before playing
 
 `TUIYA_TOKEN` overrides the token from the config file.
 
-To get a token: open music.yandex.ru, look at any request to
-`api.music.yandex.net` in the developer tools and copy the value out of the
-`Authorization: OAuth <token>` header.
+For manual sign-in, use [Yandex OAuth](https://oauth.yandex.ru/authorize?response_type=token&client_id=23cabbbdc6cd418abb4b39c32c41195d).
+The token is the `access_token` value after `#` in the redirected URL.
 
 The token grants full access to the account, so keep the config at mode `600`
 and out of version control.

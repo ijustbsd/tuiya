@@ -3,6 +3,7 @@ mod app;
 mod audio;
 mod cache;
 mod config;
+mod login;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod media;
 mod stream;
@@ -29,6 +30,7 @@ async fn main() -> Result<()> {
                 "Usage: tuiya [COMMAND]\n\n\
                  Run without arguments to start the player.\n\n\
                  Commands:\n\
+                 \x20 login        Sign in to Yandex Music through your browser\n\
                  \x20 self-update  Install the latest release from GitHub\n\
                  \x20 version      Print the installed version\n\
                  \x20 help         Show this help"
@@ -36,14 +38,22 @@ async fn main() -> Result<()> {
             return Ok(());
         }
         Command::Update => return update::run().await,
+        Command::Login => {
+            login::run(&mut Config::load()?).await?;
+            return Ok(());
+        }
         Command::Play => {}
     }
 
-    let config = Config::load()?;
+    let mut config = Config::load()?;
 
-    let client = api::Client::new(&config.token, config.api_quality(), config.codecs())
-        .await
-        .context("cannot connect to Yandex Music")?;
+    let client = if config.token.trim().is_empty() {
+        login::run(&mut config).await?
+    } else {
+        api::Client::new(&config.token, config.api_quality(), config.codecs())
+            .await
+            .context("cannot connect to Yandex Music; run tuiya login to sign in again")?
+    };
 
     let cache_dir = Config::cache_dir()?;
     std::fs::create_dir_all(&cache_dir)
@@ -71,6 +81,7 @@ enum Command {
     Version,
     Help,
     Update,
+    Login,
 }
 
 fn command(args: &[String]) -> Result<Command> {
@@ -80,6 +91,7 @@ fn command(args: &[String]) -> Result<Command> {
             "version" => Ok(Command::Version),
             "help" => Ok(Command::Help),
             "self-update" => Ok(Command::Update),
+            "login" => Ok(Command::Login),
             _ => bail!("Unknown command: {arg}. Run tuiya help for usage."),
         },
         _ => bail!("Unexpected arguments. Run tuiya help for usage."),
@@ -97,6 +109,7 @@ mod tests {
             ("self-update", Command::Update),
             ("version", Command::Version),
             ("help", Command::Help),
+            ("login", Command::Login),
         ] {
             assert_eq!(command(&[arg.into()]).unwrap(), expected);
         }
