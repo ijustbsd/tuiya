@@ -33,10 +33,38 @@ space pause · n next · b prev · ←/→ ±5s · l like · Tab switch · q qui
 
 ## Install
 
-Requires Rust 1.93+ and a working audio output (ALSA/PipeWire/PulseAudio).
+Install the latest release for Linux x86_64/aarch64 or macOS (Intel and Apple
+Silicon). Requires `curl` and `tar`; Rust is not needed.
 
 ```sh
-cargo build --release
+curl -fsSL https://raw.githubusercontent.com/ijustbsd/tuiya/master/install.sh | sh
+```
+
+The script installs `tuiya` into `~/.local/bin` without `sudo`. Add that directory
+to your shell's `PATH` if needed:
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"
+tuiya
+```
+
+Run the installer again to update. From a checkout, you can also choose a
+release and destination:
+
+```sh
+./install.sh --version 0.1.0 --bin-dir "$HOME/.local/bin"
+```
+
+Linux binaries are built on Ubuntu 24.04 with glibc and require the ALSA runtime
+library (`libasound2t64` on Ubuntu 24.04). A working audio output is required.
+
+### Build from source
+
+Requires Rust 1.93+. On Linux, install the ALSA development headers and
+`pkg-config` first (`libasound2-dev` and `pkg-config` on Ubuntu).
+
+```sh
+cargo build --release --locked
 ./target/release/tuiya
 ```
 
