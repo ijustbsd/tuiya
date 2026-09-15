@@ -5,10 +5,11 @@ mod cache;
 mod config;
 mod stream;
 mod ui;
+mod update;
 
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::app::App;
 use crate::audio::Audio;
@@ -16,12 +17,24 @@ use crate::config::Config;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    if std::env::args()
-        .skip(1)
-        .any(|arg| arg == "--version" || arg == "-V")
-    {
-        println!("tuiya {}", env!("TUIYA_VERSION"));
-        return Ok(());
+    match command(&std::env::args().skip(1).collect::<Vec<_>>())? {
+        Command::Version => {
+            println!("tuiya {}", env!("TUIYA_VERSION"));
+            return Ok(());
+        }
+        Command::Help => {
+            println!(
+                "Usage: tuiya [COMMAND]\n\n\
+                 Run without arguments to start the player.\n\n\
+                 Commands:\n\
+                 \x20 self-update  Install the latest release from GitHub\n\
+                 \x20 version      Print the installed version\n\
+                 \x20 help         Show this help"
+            );
+            return Ok(());
+        }
+        Command::Update => return update::run().await,
+        Command::Play => {}
     }
 
     let config = Config::load()?;
@@ -48,4 +61,46 @@ async fn main() -> Result<()> {
     ratatui::restore();
 
     result
+}
+
+#[derive(Debug, PartialEq)]
+enum Command {
+    Play,
+    Version,
+    Help,
+    Update,
+}
+
+fn command(args: &[String]) -> Result<Command> {
+    match args {
+        [] => Ok(Command::Play),
+        [arg] => match arg.as_str() {
+            "version" => Ok(Command::Version),
+            "help" => Ok(Command::Help),
+            "self-update" => Ok(Command::Update),
+            _ => bail!("Unknown command: {arg}. Run tuiya help for usage."),
+        },
+        _ => bail!("Unexpected arguments. Run tuiya help for usage."),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn commands_do_not_fall_through_to_player_startup() {
+        assert_eq!(command(&[]).unwrap(), Command::Play);
+        for (arg, expected) in [
+            ("self-update", Command::Update),
+            ("version", Command::Version),
+            ("help", Command::Help),
+        ] {
+            assert_eq!(command(&[arg.into()]).unwrap(), expected);
+        }
+        for arg in ["self-updat", "--version", "-V", "--help", "-h"] {
+            assert!(command(&[arg.into()]).is_err());
+        }
+        assert!(command(&["self-update".into(), "version".into()]).is_err());
+    }
 }

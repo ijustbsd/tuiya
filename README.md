@@ -48,8 +48,21 @@ export PATH="$HOME/.local/bin:$PATH"
 tuiya
 ```
 
-Run the installer again to update. From a checkout, you can also choose a
-release and destination:
+To update an installed player to the latest release:
+
+```sh
+tuiya self-update
+```
+
+This updates the running executable in its installation directory, checks the
+downloaded binary before replacing it, and skips installation if your version
+is already current or newer. It works without a Yandex Music token. The install
+directory must be writable. For older releases without this command, run the
+installer again.
+
+Use `tuiya version` to print the installed version and `tuiya help` for usage.
+
+From a checkout, you can also choose a release and destination:
 
 ```sh
 ./install.sh --version 0.1.0 --bin-dir "$HOME/.local/bin"
@@ -141,7 +154,7 @@ Versions are not written down anywhere — they are worked out from commit
 messages. Pushing to `master` runs the lints and tests, decides the next
 version, builds binaries for Linux x86_64, Linux aarch64 and a universal
 macOS binary, and publishes a GitHub release with notes generated from the
-commits. `tuiya --version` reports what it was built from; between tags it
+commits. `tuiya version` reports what it was built from; between tags it
 says so, as in `0.2.0-3-gaecf094`.
 
 This only works if commit subjects follow

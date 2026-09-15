@@ -61,8 +61,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # The tests need no audio device, no network and no token: they cover
-      # the stream buffer and the seek limiter, which are pure logic.
+      # Tests need no audio device, internet access or token. Update downloads
+      # are tested against a local HTTP server.
       - name: Run tests
         run: cargo test --locked
 
@@ -141,7 +141,7 @@ jobs:
             target: universal-apple-darwin
     runs-on: ${{ matrix.os }}
     env:
-      # build.rs stamps this into the binary, so `tuiya --version` matches the
+      # build.rs stamps this into the binary, so `tuiya version` matches the
       # release even though Cargo.toml was never touched.
       TUIYA_VERSION: ${{ needs.version.outputs.version }}
     steps:
@@ -178,7 +178,7 @@ jobs:
           lipo -info target/release/tuiya
 
       - name: Check the stamped version
-        run: ./target/release/tuiya --version
+        run: ./target/release/tuiya version
 
       - name: Package
         run: tar -czf tuiya-${{ needs.version.outputs.version }}-${{ matrix.target }}.tar.gz -C target/release tuiya
