@@ -3,6 +3,8 @@ mod app;
 mod audio;
 mod cache;
 mod config;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod media;
 mod stream;
 mod ui;
 mod update;

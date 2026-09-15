@@ -26,11 +26,17 @@ enum Command {
         /// Track length as the API reports it. The decoder often cannot say
         /// (MP3 returns nothing), and the seek limiter needs a real number.
         duration: Duration,
+        paused: bool,
     },
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     TogglePause,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    SetPaused(bool),
     Stop,
     SetVolume(f32),
-    SeekBy(i64),
+    SeekBy(f64),
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    SeekTo(Duration),
 }
 
 /// A snapshot of playback state for the UI to read.
@@ -38,6 +44,8 @@ enum Command {
 pub struct AudioState {
     pub epoch: u64,
     pub position: Duration,
+    /// Changes after each successful seek, including seeks smaller than a tick.
+    pub seek_serial: u64,
     pub paused: bool,
     /// The track reached its end on its own.
     pub ended: bool,
@@ -113,16 +121,23 @@ impl Audio {
             .clone()
     }
 
-    pub fn play(&self, source: TrackSource, epoch: u64, duration: Duration) {
+    pub fn play(&self, source: TrackSource, epoch: u64, duration: Duration, paused: bool) {
         let _ = self.tx.send(Command::Play {
             source,
             epoch,
             duration,
+            paused,
         });
     }
 
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     pub fn toggle_pause(&self) {
         let _ = self.tx.send(Command::TogglePause);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn set_paused(&self, paused: bool) {
+        let _ = self.tx.send(Command::SetPaused(paused));
     }
 
     pub fn stop(&self) {
@@ -133,8 +148,13 @@ impl Audio {
         let _ = self.tx.send(Command::SetVolume(volume.clamp(0.0, 2.0)));
     }
 
-    pub fn seek_by(&self, seconds: i64) {
+    pub fn seek_by(&self, seconds: f64) {
         let _ = self.tx.send(Command::SeekBy(seconds));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn seek_to(&self, position: Duration) {
+        let _ = self.tx.send(Command::SeekTo(position));
     }
 }
 
@@ -156,6 +176,7 @@ fn run(sink: MixerDeviceSink, rx: Receiver<Command>, state: Arc<Mutex<AudioState
                 source,
                 epoch,
                 duration,
+                paused,
             }) => {
                 // Just drop the old Player: its Drop stops the sound without
                 // blocking, and the new one starts right away.
@@ -172,8 +193,10 @@ fn run(sink: MixerDeviceSink, rx: Receiver<Command>, state: Arc<Mutex<AudioState
                     Ok(decoder) => {
                         let fresh = Player::connect_new(sink.mixer());
                         fresh.set_volume(volume);
+                        if paused {
+                            fresh.pause();
+                        }
                         fresh.append(decoder);
-                        fresh.play();
                         player = Some(fresh);
                         loaded = Some(Loaded { buffer, duration });
                         snapshot.loaded = true;
@@ -186,6 +209,7 @@ fn run(sink: MixerDeviceSink, rx: Receiver<Command>, state: Arc<Mutex<AudioState
 
                 *state.lock().expect("audio state mutex poisoned") = snapshot;
             }
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             Ok(Command::TogglePause) => {
                 if let Some(player) = &player {
                     if player.is_paused() {
@@ -195,12 +219,25 @@ fn run(sink: MixerDeviceSink, rx: Receiver<Command>, state: Arc<Mutex<AudioState
                     }
                 }
             }
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            Ok(Command::SetPaused(paused)) => {
+                if let Some(player) = &player {
+                    if paused {
+                        player.pause();
+                    } else {
+                        player.play();
+                    }
+                }
+            }
             Ok(Command::Stop) => {
                 player = None;
                 loaded = None;
                 let mut snapshot = state.lock().expect("audio state mutex poisoned");
                 snapshot.loaded = false;
                 snapshot.position = Duration::ZERO;
+                snapshot.paused = false;
+                snapshot.ended = false;
+                snapshot.error = None;
             }
             Ok(Command::SetVolume(value)) => {
                 volume = value;
@@ -212,18 +249,28 @@ fn run(sink: MixerDeviceSink, rx: Receiver<Command>, state: Arc<Mutex<AudioState
             Ok(Command::SeekBy(delta)) => {
                 if let Some(player) = &player {
                     let current = player.get_pos().as_secs_f64();
-                    let wanted = (current + delta as f64).max(0.0);
-                    let (target, clamped) = clamp_seek(wanted, loaded.as_ref());
-
-                    let message = if let Err(e) = player.try_seek(Duration::from_secs_f64(target)) {
-                        Some(format!("seek failed: {e}"))
-                    } else if clamped {
-                        Some("seek limited to the downloaded part".to_string())
-                    } else {
-                        None
-                    };
+                    let wanted = (current + delta).max(0.0);
+                    let (succeeded, message) = seek(player, wanted, loaded.as_ref());
+                    let mut snapshot = state.lock().expect("audio state mutex poisoned");
+                    if succeeded {
+                        snapshot.seek_serial = snapshot.seek_serial.wrapping_add(1);
+                    }
                     if message.is_some() {
-                        state.lock().expect("audio state mutex poisoned").notice = message;
+                        snapshot.notice = message;
+                    }
+                }
+            }
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            Ok(Command::SeekTo(position)) => {
+                if let Some(player) = &player {
+                    let (succeeded, message) =
+                        seek(player, position.as_secs_f64(), loaded.as_ref());
+                    let mut snapshot = state.lock().expect("audio state mutex poisoned");
+                    if succeeded {
+                        snapshot.seek_serial = snapshot.seek_serial.wrapping_add(1);
+                    }
+                    if message.is_some() {
+                        snapshot.notice = message;
                     }
                 }
             }
@@ -242,6 +289,21 @@ fn run(sink: MixerDeviceSink, rx: Receiver<Command>, state: Arc<Mutex<AudioState
                 }
             }
         }
+    }
+}
+
+fn seek(player: &Player, wanted: f64, loaded: Option<&Loaded>) -> (bool, Option<String>) {
+    let wanted = loaded.map_or(wanted, |track| wanted.min(track.duration.as_secs_f64()));
+    let (target, clamped) = clamp_seek(wanted, loaded);
+    if let Err(e) = player.try_seek(Duration::from_secs_f64(target)) {
+        (false, Some(format!("seek failed: {e}")))
+    } else if clamped {
+        (
+            true,
+            Some("seek limited to the downloaded part".to_string()),
+        )
+    } else {
+        (true, None)
     }
 }
 

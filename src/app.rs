@@ -93,10 +93,21 @@ pub struct Playing {
 pub enum Message {
     Wave(Result<WaveBatch>),
     Likes(Result<(Vec<Track>, HashSet<String>)>),
-    Ready { epoch: u64, source: TrackSource },
-    Failed { epoch: u64, error: String },
-    LikeChanged { track_id: String, liked: bool },
+    Ready {
+        epoch: u64,
+        source: TrackSource,
+    },
+    Failed {
+        epoch: u64,
+        error: String,
+    },
+    LikeChanged {
+        track_id: String,
+        liked: bool,
+    },
     Notice(String),
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    Media(crate::media::Event),
 }
 
 pub struct App {
@@ -114,6 +125,8 @@ pub struct App {
     pub shuffle: bool,
     pub volume: f32,
     pub loading_track: bool,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pause_on_load: bool,
     /// Start playback before the download finishes.
     streaming: bool,
 
@@ -152,6 +165,8 @@ impl App {
             shuffle: false,
             volume,
             loading_track: false,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            pause_on_load: false,
             streaming,
             wave_batch_id: None,
             wave_requested: false,
@@ -164,6 +179,14 @@ impl App {
     }
 
     pub async fn run(mut self, mut terminal: DefaultTerminal) -> Result<()> {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let media = match crate::media::Session::new(self.tx.clone()) {
+            Ok(media) => Some(media),
+            Err(error) => {
+                self.status = format!("System media controls unavailable: {error:#}");
+                None
+            }
+        };
         self.load_likes();
         self.start_wave();
 
@@ -174,6 +197,10 @@ impl App {
             tokio::select! {
                 _ = ticker.tick() => {
                     self.poll_audio();
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    if let Some(media) = &media {
+                        media.update(&self);
+                    }
                     terminal.draw(|frame| ui::render(frame, &mut self))?;
                 }
                 Some(Ok(event)) = events.next() => {
@@ -327,6 +354,10 @@ impl App {
         self.queue_mut(other).playing = None;
         self.queue_mut(tab).playing = Some(index);
         self.loading_track = true;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            self.pause_on_load = false;
+        }
         self.status = format!("Loading \"{}\"…", track.label());
         self.playing = Some(Playing {
             tab,
@@ -482,7 +513,13 @@ impl App {
                     if was_empty {
                         self.wave.cursor = 0;
                     }
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    let paused = self.pause_on_load;
                     self.play_index(Tab::Wave, start);
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    {
+                        self.pause_on_load = paused;
+                    }
                 }
             }
             Message::Wave(Err(e)) => {
@@ -508,7 +545,12 @@ impl App {
                 if let Some(playing) = self.playing.as_ref()
                     && playing.epoch == epoch
                 {
-                    self.audio.play(source, epoch, playing.track.duration);
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    let paused = self.pause_on_load;
+                    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                    let paused = false;
+                    self.audio
+                        .play(source, epoch, playing.track.duration, paused);
                 }
             }
             Message::Failed { epoch, error } => {
@@ -533,6 +575,8 @@ impl App {
                 }
             }
             Message::Notice(text) => self.status = text,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            Message::Media(event) => self.on_media(event),
         }
     }
 
@@ -566,11 +610,19 @@ impl App {
                 let (tab, index) = (self.tab, self.queue(self.tab).cursor);
                 self.play_index(tab, index);
             }
-            KeyCode::Char(' ') => self.audio.toggle_pause(),
+            KeyCode::Char(' ') => {
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                {
+                    self.pause_on_load = !self.pause_on_load;
+                    self.audio.set_paused(self.pause_on_load);
+                }
+                #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                self.audio.toggle_pause();
+            }
             KeyCode::Char('n') => self.next_track(true),
             KeyCode::Char('b') => self.previous_track(),
-            KeyCode::Right => self.audio.seek_by(SEEK_STEP),
-            KeyCode::Left => self.audio.seek_by(-SEEK_STEP),
+            KeyCode::Right => self.audio.seek_by(SEEK_STEP as f64),
+            KeyCode::Left => self.audio.seek_by(-SEEK_STEP as f64),
             KeyCode::Char('+') | KeyCode::Char('=') => self.nudge_volume(VOLUME_STEP),
             KeyCode::Char('-') | KeyCode::Char('_') => self.nudge_volume(-VOLUME_STEP),
             KeyCode::Char('l') => self.toggle_like(),
@@ -588,6 +640,71 @@ impl App {
                 self.load_likes();
             }
             _ => {}
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn on_media(&mut self, event: crate::media::Event) {
+        use crate::media::Event;
+        match event {
+            Event::Play => {
+                self.pause_on_load = false;
+                if self.playing.is_some() {
+                    self.audio.set_paused(false);
+                } else {
+                    self.play_index(self.tab, self.queue(self.tab).cursor);
+                }
+            }
+            Event::Pause => {
+                self.pause_on_load = true;
+                self.audio.set_paused(true);
+            }
+            Event::Toggle => {
+                if self.playing.is_some() {
+                    self.pause_on_load = !self.pause_on_load;
+                    self.audio.set_paused(self.pause_on_load);
+                } else {
+                    self.play_index(self.tab, self.queue(self.tab).cursor);
+                }
+            }
+            Event::Next | Event::Previous => {
+                let paused = self.pause_on_load;
+                if event == Event::Next {
+                    self.next_track(true);
+                } else {
+                    self.previous_track();
+                }
+                self.pause_on_load = paused;
+                self.audio.set_paused(paused);
+            }
+            Event::Stop => {
+                self.audio.stop();
+                self.playing = None;
+                self.wave.playing = None;
+                self.likes.playing = None;
+                self.loading_track = false;
+                self.pause_on_load = false;
+                self.wave_autoplay_pending = false;
+                self.status.clear();
+            }
+            Event::SeekBy(seconds) => self.audio.seek_by(seconds),
+            Event::SeekTo { epoch, position } => {
+                if self.playing.as_ref().is_some_and(|playing| {
+                    playing.epoch == epoch && position <= playing.track.duration
+                }) && self.audio.state().epoch == epoch
+                {
+                    self.audio.seek_to(position);
+                }
+            }
+            #[cfg(target_os = "linux")]
+            Event::SetVolume(volume) => {
+                if volume.is_finite() {
+                    self.volume = volume.clamp(0.0, 2.0) as f32;
+                    self.audio.set_volume(self.volume);
+                }
+            }
+            #[cfg(target_os = "linux")]
+            Event::Quit => self.should_quit = true,
         }
     }
 

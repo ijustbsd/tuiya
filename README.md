@@ -23,6 +23,10 @@ space pause · n next · b prev · ←/→ ±5s · l like · Tab switch · q qui
   you actually listen to.
 - **Liked tracks** — the whole liked list with metadata, in order or shuffled.
 - Like and unlike from inside the player.
+- System media controls on Linux (MPRIS) and macOS (Now Playing): the current
+  track appears in the desktop's media panel, with play/pause, next/previous
+  and seeking. Linux also exposes volume control.
+  Media keys work even when the terminal is not focused.
 - Streaming playback: a track starts within a second or two instead of after
   its whole file has arrived.
 - On-disk cache: a streamed track is kept once it finishes, and the next track
@@ -119,6 +123,19 @@ and out of version control.
 | `r` | reload the liked list |
 | `q`, `Esc`, `Ctrl-C` | quit |
 
+On Linux, system media controls are registered automatically on the session
+D-Bus as `org.mpris.MediaPlayer2.tuiya.instance<PID>`. GNOME and KDE can display
+the track and route media keys to tuiya. You can also use
+`playerctl --player=tuiya play-pause` (or `next`, `previous`, `position 5+`).
+On window managers without media key handling, bind the keys to these commands.
+Playback still works when the session bus is unavailable.
+
+On macOS, tuiya publishes the track, artist, duration and playback position
+to Now Playing in Control Center. System media keys and headphone controls
+can play/pause and move between tracks while the terminal is unfocused.
+Now Playing also supports changing the playback position. The system chooses
+which active player receives media commands.
+
 ## How it works
 
 ```
@@ -126,6 +143,7 @@ api/      calls to api.music.yandex.net: wave, likes, signed file links
 stream.rs a partially downloaded track that can be read and seeked
 cache.rs  opens tracks for playback, downloads into ~/.cache/tuiya, eviction
 audio.rs  a dedicated OS thread running rodio: decoding and playback
+media/    Linux MPRIS and macOS Now Playing metadata and media commands
 app.rs    state, queues, keyboard, background tasks
 ui.rs     ratatui rendering
 ```
