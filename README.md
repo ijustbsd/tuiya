@@ -87,7 +87,13 @@ cargo build --release --locked
 
 ## Configuration
 
-Press `o` in the player to open Settings. Use `↑`/`↓` or `Tab` to
+When Yandex advertises tuning choices, press `w` on the Wave tab to tune the
+current Wave by language, mood and mix. Choose **Apply to Wave** to start a
+fresh Rotor session. These choices are not saved to the account or config;
+every tuiya launch starts with the default personal Wave. If the choices cannot
+be loaded, the default Wave keeps working and the tuning control stays hidden.
+
+Press `o` in the player to open application Settings. Use `↑`/`↓` or `Tab` to
 select a field and `←`/`→` to change it. For the cache size, type a number in
 MB. Press `Ctrl-S` or select **Save changes** and press `Enter` to save;
 `Esc` cancels edits.
@@ -145,6 +151,7 @@ and out of version control.
 | `l` | like the playing track (or the highlighted one if nothing plays) |
 | `s` | shuffle liked tracks |
 | `r` | reload the liked list |
+| `w` | tune the current Wave session (on the Wave tab) |
 | `o` | open settings |
 | `q`, `Esc`, `Ctrl-C` | quit |
 

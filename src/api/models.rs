@@ -88,6 +88,8 @@ pub struct RawWaveResult {
     pub sequence: Vec<RawSequenceItem>,
     #[serde(rename = "batchId")]
     pub batch_id: Option<String>,
+    #[serde(rename = "radioSessionId")]
+    pub session_id: Option<String>,
 }
 
 /// One batch of wave tracks along with its session identifiers.
@@ -95,6 +97,142 @@ pub struct RawWaveResult {
 pub struct WaveBatch {
     pub tracks: Vec<Track>,
     pub batch_id: Option<String>,
+    pub session_id: Option<String>,
+}
+
+/// One server-provided choice for a Wave tuning dimension.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaveOption {
+    pub name: String,
+    /// `None` is the server-marked default and is omitted from session seeds.
+    pub seed: Option<String>,
+}
+
+/// Server-provided choices supported by the current Wave.
+#[derive(Debug, Clone)]
+pub struct WaveRestrictions {
+    pub language: Vec<WaveOption>,
+    pub mood_energy: Vec<WaveOption>,
+    pub diversity: Vec<WaveOption>,
+}
+
+/// Tuning seeds used only for the current Wave session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaveSettings {
+    pub language: WaveOption,
+    pub diversity: WaveOption,
+    pub mood_energy: WaveOption,
+}
+
+impl WaveSettings {
+    pub fn language_label(&self) -> &str {
+        &self.language.name
+    }
+
+    pub fn mood_label(&self) -> &str {
+        &self.mood_energy.name
+    }
+
+    pub fn diversity_label(&self) -> &str {
+        &self.diversity.name
+    }
+
+    pub fn seeds(&self) -> Vec<String> {
+        let mut seeds = vec!["user:onyourwave".into()];
+        for choice in [&self.language, &self.mood_energy, &self.diversity] {
+            if let Some(seed) = &choice.seed {
+                seeds.push(seed.clone());
+            }
+        }
+        seeds
+    }
+}
+
+impl WaveRestrictions {
+    pub fn defaults(&self) -> Option<WaveSettings> {
+        Some(WaveSettings {
+            language: self
+                .language
+                .iter()
+                .find(|option| option.seed.is_none())?
+                .clone(),
+            mood_energy: self
+                .mood_energy
+                .iter()
+                .find(|option| option.seed.is_none())?
+                .clone(),
+            diversity: self
+                .diversity
+                .iter()
+                .find(|option| option.seed.is_none())?
+                .clone(),
+        })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RawStationResult {
+    pub station: RawWaveStation,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RawWaveStation {
+    #[serde(rename = "restrictions2")]
+    pub restrictions: RawWaveRestrictions,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RawWaveRestrictions {
+    pub language: RawEnumRestriction,
+    pub diversity: RawEnumRestriction,
+    #[serde(rename = "moodEnergy")]
+    pub mood_energy: RawEnumRestriction,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RawEnumRestriction {
+    #[serde(rename = "possibleValues")]
+    pub possible_values: Vec<RawRestrictionValue>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RawRestrictionValue {
+    pub name: String,
+    #[serde(rename = "serializedSeed")]
+    pub serialized_seed: String,
+    #[serde(default)]
+    pub unspecified: bool,
+}
+
+#[cfg(test)]
+mod wave_tests {
+    use super::*;
+
+    #[test]
+    fn wave_settings_build_session_only_seeds() {
+        let settings = WaveSettings {
+            language: WaveOption {
+                name: "Русский".into(),
+                seed: Some("settingLanguage:russian".into()),
+            },
+            mood_energy: WaveOption {
+                name: "Любое".into(),
+                seed: None,
+            },
+            diversity: WaveOption {
+                name: "Незнакомое".into(),
+                seed: Some("settingDiversity:discover".into()),
+            },
+        };
+        assert_eq!(
+            settings.seeds(),
+            [
+                "user:onyourwave",
+                "settingLanguage:russian",
+                "settingDiversity:discover",
+            ]
+        );
+    }
 }
 
 // --- Liked tracks ------------------------------------------------------

@@ -10,6 +10,7 @@ mod settings;
 mod stream;
 mod ui;
 mod update;
+mod wave_settings;
 
 use std::sync::Arc;
 

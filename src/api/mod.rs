@@ -10,11 +10,11 @@ use sha2::Sha256;
 use models::*;
 
 const API: &str = "https://api.music.yandex.net";
+const ROTOR_API: &str = "https://api.music.yandex.ru";
 const CLIENT_HEADER: &str = "YandexMusicWebNext/1.0.0";
+const UI_LANGUAGE: &str = "en";
 /// The key Yandex signs file-link requests with.
 const SIGN_KEY: &[u8] = b"7tvSmFbyf5hJnIHhCimDDD";
-/// The "My Wave" station.
-pub const WAVE_STATION: &str = "user:onyourwave";
 /// Track metadata is fetched in batches — a liked list can be long.
 const META_CHUNK: usize = 250;
 /// How many times to retry a request that came back 429 or 5xx.
@@ -147,18 +147,73 @@ impl Client {
             .header("X-Yandex-Music-Client", CLIENT_HEADER)
     }
 
-    /// The next batch of "My Wave".
-    ///
-    /// `after` is the id of the last track played: it tells the station where
-    /// we stopped so it does not repeat itself.
-    pub async fn wave_tracks(&self, after: Option<&str>) -> Result<WaveBatch> {
-        let mut request = self
-            .get(&format!("/rotor/station/{WAVE_STATION}/tracks"))
-            .query(&[("settings2", "true")]);
-        if let Some(after) = after {
-            request = request.query(&[("queue", after)]);
-        }
+    fn rotor_post(&self, path: &str) -> reqwest::RequestBuilder {
+        self.http
+            .post(format!("{ROTOR_API}{path}"))
+            .header(
+                reqwest::header::AUTHORIZATION,
+                format!("OAuth {}", self.token),
+            )
+            .header("X-Yandex-Music-Client", CLIENT_HEADER)
+            .header(reqwest::header::ACCEPT_LANGUAGE, UI_LANGUAGE)
+    }
 
+    /// Start a fresh, non-persistent "My Wave" session with tuning seeds.
+    pub async fn start_wave(&self, settings: Option<&WaveSettings>) -> Result<WaveBatch> {
+        let seeds = settings
+            .map(WaveSettings::seeds)
+            .unwrap_or_else(|| vec!["user:onyourwave".into()]);
+        let request = self
+            .rotor_post("/rotor/session/new")
+            .json(&serde_json::json!({
+                "seeds": seeds,
+                "includeTracksInResponse": true,
+                "includeWaveModel": true,
+                "interactive": true,
+            }));
+
+        self.parse_wave_response(request).await
+    }
+
+    /// Discover tuning choices advertised for the current user's Wave.
+    pub async fn wave_restrictions(&self) -> Result<WaveRestrictions> {
+        let response: Envelope<Vec<RawStationResult>> = send_retrying(
+            self.get("/rotor/station/user:onyourwave/info")
+                .header(reqwest::header::ACCEPT_LANGUAGE, UI_LANGUAGE),
+            "the wave settings failed to load",
+        )
+        .await?
+        .json()
+        .await
+        .context("unexpected wave-settings response")?;
+        let raw = response
+            .result
+            .into_iter()
+            .next()
+            .context("the wave returned no settings")?
+            .station
+            .restrictions;
+        let restrictions = WaveRestrictions {
+            language: wave_options(raw.language),
+            mood_energy: wave_options(raw.mood_energy),
+            diversity: wave_options(raw.diversity),
+        };
+        restrictions
+            .defaults()
+            .context("the wave settings have no defaults")?;
+        Ok(restrictions)
+    }
+
+    /// Continue an existing Wave session.
+    pub async fn wave_tracks(&self, session_id: &str, after: &str) -> Result<WaveBatch> {
+        let request = self
+            .rotor_post(&format!("/rotor/session/{session_id}/tracks"))
+            .json(&serde_json::json!({ "queue": [after] }));
+
+        self.parse_wave_response(request).await
+    }
+
+    async fn parse_wave_response(&self, request: reqwest::RequestBuilder) -> Result<WaveBatch> {
         let response: Envelope<RawWaveResult> =
             send_retrying(request, "the wave did not return tracks")
                 .await?
@@ -178,6 +233,7 @@ impl Client {
         Ok(WaveBatch {
             tracks,
             batch_id: result.batch_id,
+            session_id: result.session_id,
         })
     }
 
@@ -289,7 +345,12 @@ impl Client {
 
     /// Tell the wave what is happening to a track. Failures here are not
     /// fatal: playback continues, the station just serves worse picks.
-    pub async fn wave_feedback(&self, batch_id: Option<&str>, event: Feedback) -> Result<()> {
+    pub async fn wave_feedback(
+        &self,
+        session_id: &str,
+        batch_id: Option<&str>,
+        event: Feedback,
+    ) -> Result<()> {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -326,12 +387,25 @@ impl Client {
             }),
         };
 
-        let mut request = self.post(&format!("/rotor/station/{WAVE_STATION}/feedback"));
-        if let Some(batch_id) = batch_id {
-            request = request.query(&[("batch-id", batch_id)]);
-        }
-
-        send_retrying(request.json(&body), "the wave rejected the event").await?;
+        let request = self
+            .rotor_post(&format!("/rotor/session/{session_id}/feedback/"))
+            .json(&serde_json::json!({
+                "event": body,
+                "batchId": batch_id,
+                "from": "tuiya-my-wave",
+            }));
+        send_retrying(request, "the wave rejected the event").await?;
         Ok(())
     }
+}
+
+fn wave_options(restriction: RawEnumRestriction) -> Vec<WaveOption> {
+    restriction
+        .possible_values
+        .into_iter()
+        .map(|value| WaveOption {
+            name: value.name,
+            seed: (!value.unspecified).then_some(value.serialized_seed),
+        })
+        .collect()
 }

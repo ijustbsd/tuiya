@@ -10,6 +10,7 @@ use ratatui::widgets::{
 
 use crate::app::{App, Tab};
 use crate::settings::Settings;
+use crate::wave_settings::WaveSettingsDialog;
 
 const ACCENT: Color = Color::Yellow;
 
@@ -29,6 +30,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     if let Some(settings) = &mut app.settings {
         render_settings(frame, settings);
     }
+    if let Some(settings) = &mut app.wave_settings_dialog {
+        render_wave_settings(frame, settings);
+    }
 }
 
 fn render_header(frame: &mut Frame, area: Rect, app: &App) {
@@ -46,6 +50,12 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
         " o settings ",
         Style::new().fg(Color::DarkGray),
     ));
+    if app.tab == Tab::Wave && app.wave_restrictions.is_some() {
+        spans.push(Span::styled(
+            " w tune Wave ",
+            Style::new().fg(Color::DarkGray),
+        ));
+    }
     frame.render_widget(Line::from(spans), area);
 }
 
@@ -82,7 +92,17 @@ fn render_list(frame: &mut Frame, area: Rect, app: &mut App) {
     };
 
     let title = match tab {
-        Tab::Wave => " My Wave ".to_string(),
+        Tab::Wave => app.wave_settings.as_ref().map_or_else(
+            || " My Wave ".to_string(),
+            |settings| {
+                format!(
+                    " My Wave · {} · {} · {} ",
+                    settings.language_label(),
+                    settings.mood_label(),
+                    settings.diversity_label(),
+                )
+            },
+        ),
         Tab::Likes => format!(" Liked ({}) ", app.likes.tracks.len()),
     };
     let block = Block::bordered()
@@ -192,8 +212,15 @@ fn render_player(frame: &mut Frame, area: Rect, app: &App) {
         ),
     ]);
 
+    let wave_key = if app.tab == Tab::Wave && app.wave_restrictions.is_some() {
+        " · w tune Wave"
+    } else {
+        ""
+    };
     let keys = Line::from(Span::styled(
-        "space pause · n next · b prev · ←/→ ±5s · +/- volume · l like · s shuffle · Tab switch · r refresh · o settings · q quit",
+        format!(
+            "space pause · n next · b prev · ←/→ ±5s · +/- volume · l like{wave_key} · Tab switch · o settings · q quit"
+        ),
         Style::new().fg(Color::DarkGray),
     ));
 
@@ -301,6 +328,70 @@ fn render_settings(frame: &mut Frame, settings: &mut Settings) {
     );
 }
 
+fn render_wave_settings(frame: &mut Frame, settings: &mut WaveSettingsDialog) {
+    let area = frame.area();
+    let width = area.width.min(70);
+    let height = area.height.min(16);
+    let popup = Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    );
+    frame.render_widget(Clear, popup);
+    let block = Block::bordered()
+        .title(" Tune this Wave ")
+        .border_style(Style::new().fg(ACCENT))
+        .style(Style::new().bg(Color::Black));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let [intro, table, help, footer] = Layout::vertical([
+        Constraint::Length(if inner.height >= 10 { 2 } else { 0 }),
+        Constraint::Min(0),
+        Constraint::Length(if inner.height >= 10 { 3 } else { 0 }),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    frame.render_widget(
+        Paragraph::new("  These choices apply only to the current app session.")
+            .style(Style::new().fg(Color::DarkGray)),
+        intro,
+    );
+
+    let rows = [
+        (
+            "Language",
+            format!("◀ {} ▶", settings.draft.language_label()),
+        ),
+        ("Mood", format!("◀ {} ▶", settings.draft.mood_label())),
+        ("Mix", format!("◀ {} ▶", settings.draft.diversity_label())),
+        ("Apply to Wave", "Enter".into()),
+    ]
+    .into_iter()
+    .map(|(label, value)| Row::new([Cell::from(format!(" {label}")), Cell::from(value)]));
+    settings.table.select(Some(settings.selected));
+    frame.render_stateful_widget(
+        Table::new(rows, [Constraint::Percentage(40), Constraint::Fill(1)])
+            .highlight_spacing(HighlightSpacing::Always)
+            .highlight_symbol("› ")
+            .row_highlight_style(Style::new().fg(Color::Black).bg(ACCENT).bold()),
+        table,
+        &mut settings.table,
+    );
+    frame.render_widget(
+        Paragraph::new(settings.help())
+            .wrap(Wrap { trim: true })
+            .style(Style::new().fg(Color::DarkGray)),
+        help,
+    );
+    frame.render_widget(
+        Paragraph::new("↑/↓ select · ←/→ change · Enter apply · Esc cancel")
+            .style(Style::new().fg(ACCENT)),
+        footer,
+    );
+}
+
 fn render_status(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(
         Line::from(Span::styled(
@@ -363,6 +454,27 @@ mod tests {
                     .collect::<String>();
                 assert!(rendered.contains("Cannot write config"));
             }
+        }
+    }
+
+    #[test]
+    fn wave_settings_render_in_small_terminals() {
+        let default = crate::api::models::WaveOption {
+            name: "Any".into(),
+            seed: None,
+        };
+        let restrictions = crate::api::models::WaveRestrictions {
+            language: vec![default.clone()],
+            mood_energy: vec![default.clone()],
+            diversity: vec![default],
+        };
+        let values = restrictions.defaults().unwrap();
+        for (width, height) in [(80, 24), (40, 10), (20, 6), (1, 1)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            let mut settings = WaveSettingsDialog::new(values.clone(), restrictions.clone());
+            terminal
+                .draw(|frame| render_wave_settings(frame, &mut settings))
+                .unwrap();
         }
     }
 }
