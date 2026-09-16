@@ -11,7 +11,7 @@ use ratatui::widgets::TableState;
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 
-use crate::api::models::{Track, WaveBatch, WaveRestrictions, WaveSettings};
+use crate::api::models::{Track, WaveBatch, WaveChoices, WaveSettings};
 use crate::api::{Client, Feedback};
 use crate::audio::Audio;
 use crate::cache;
@@ -98,7 +98,7 @@ pub enum Message {
         generation: u64,
         result: Result<WaveBatch>,
     },
-    WaveRestrictions(Result<WaveRestrictions>),
+    WaveChoices(Result<WaveChoices>),
     Likes(Result<(Vec<Track>, HashSet<String>)>),
     Ready {
         epoch: u64,
@@ -133,7 +133,7 @@ pub struct App {
     pub volume: f32,
     pub loading_track: bool,
     pub wave_settings: Option<WaveSettings>,
-    pub wave_restrictions: Option<WaveRestrictions>,
+    pub wave_choices: Option<WaveChoices>,
     pub wave_settings_dialog: Option<WaveSettingsDialog>,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pause_on_load: bool,
@@ -178,7 +178,7 @@ impl App {
             volume,
             loading_track: false,
             wave_settings: None,
-            wave_restrictions: None,
+            wave_choices: None,
             wave_settings_dialog: None,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             pause_on_load: false,
@@ -206,7 +206,7 @@ impl App {
             }
         };
         self.load_likes();
-        self.load_wave_restrictions();
+        self.load_wave_choices();
         self.start_wave(true);
 
         let mut ticker = tokio::time::interval(FRAME);
@@ -252,11 +252,12 @@ impl App {
         });
     }
 
-    fn load_wave_restrictions(&self) {
+    fn load_wave_choices(&self) {
         let api = Arc::clone(&self.api);
         let tx = self.tx.clone();
+        let current = self.wave_settings.clone().unwrap_or_default();
         tokio::spawn(async move {
-            let _ = tx.send(Message::WaveRestrictions(api.wave_restrictions().await));
+            let _ = tx.send(Message::WaveChoices(api.wave_choices(&current).await));
         });
     }
 
@@ -583,15 +584,15 @@ impl App {
                 self.status = format!("The wave is not answering: {reason}");
             }
             Message::Wave { .. } => {}
-            Message::WaveRestrictions(Ok(restrictions)) => {
-                if let Some(defaults) = restrictions.defaults() {
-                    self.wave_settings = Some(defaults);
-                    self.wave_restrictions = Some(restrictions);
+            Message::WaveChoices(Ok(choices)) => {
+                if self.wave_settings.is_none() {
+                    self.wave_settings = Some(WaveSettings::default());
                 }
+                self.wave_choices = Some(choices);
             }
             // Tuning is optional. A failure leaves the default Wave available
             // without exposing an incomplete settings dialog.
-            Message::WaveRestrictions(Err(_)) => {}
+            Message::WaveChoices(Err(_)) => {}
             Message::Likes(Ok((tracks, liked))) => {
                 self.likes.tracks = tracks;
                 self.liked = liked;
@@ -679,14 +680,13 @@ impl App {
                 self.settings = Some(Settings::new(preferences));
             }
             KeyCode::Char('w') if self.tab == Tab::Wave => {
-                if let (Some(settings), Some(restrictions)) =
-                    (&self.wave_settings, &self.wave_restrictions)
-                {
-                    self.wave_settings_dialog = Some(WaveSettingsDialog::new(
-                        settings.clone(),
-                        restrictions.clone(),
-                    ));
+                if let (Some(settings), Some(choices)) = (&self.wave_settings, &self.wave_choices) {
+                    self.wave_settings_dialog =
+                        Some(WaveSettingsDialog::new(settings.clone(), choices.clone()));
                 }
+            }
+            KeyCode::Char('R') if self.tab == Tab::Wave && self.wave_is_custom() => {
+                self.reset_wave_settings();
             }
             KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
             KeyCode::Tab | KeyCode::BackTab => self.switch_tab(),
@@ -779,16 +779,25 @@ impl App {
             .wave_settings_dialog
             .take()
             .expect("Wave settings are open")
-            .draft;
+            .selected_settings();
         if self.wave_settings.as_ref() == Some(&settings) {
             self.status = "Wave settings unchanged".into();
             return;
         }
+        self.restart_wave_with(settings);
+    }
+
+    fn reset_wave_settings(&mut self) {
+        self.restart_wave_with(WaveSettings::default());
+    }
+
+    fn restart_wave_with(&mut self, settings: WaveSettings) {
         let autoplay = self
             .playing
             .as_ref()
             .is_some_and(|playing| playing.tab == Tab::Wave);
         self.wave_settings = Some(settings);
+        self.wave_choices = None;
         self.wave_generation += 1;
         self.wave = Queue::default();
         self.wave_batch_id = None;
@@ -796,6 +805,7 @@ impl App {
         self.wave_requested = false;
         self.status = "Starting a new Wave session…".into();
         self.start_wave(autoplay);
+        self.load_wave_choices();
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -915,5 +925,11 @@ impl App {
 
     pub fn is_liked(&self, track_id: &str) -> bool {
         self.liked.contains(track_id)
+    }
+
+    pub fn wave_is_custom(&self) -> bool {
+        self.wave_settings
+            .as_ref()
+            .is_some_and(|settings| !settings.is_default())
     }
 }

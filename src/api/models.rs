@@ -100,108 +100,66 @@ pub struct WaveBatch {
     pub session_id: Option<String>,
 }
 
-/// One server-provided choice for a Wave tuning dimension.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WaveOption {
-    pub name: String,
-    /// `None` is the server-marked default and is omitted from session seeds.
-    pub seed: Option<String>,
-}
-
-/// Server-provided choices supported by the current Wave.
-#[derive(Debug, Clone)]
-pub struct WaveRestrictions {
-    pub language: Vec<WaveOption>,
-    pub mood_energy: Vec<WaveOption>,
-    pub diversity: Vec<WaveOption>,
-}
-
-/// Tuning seeds used only for the current Wave session.
+/// One server-provided Wave preset.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WaveSettings {
-    pub language: WaveOption,
-    pub diversity: WaveOption,
-    pub mood_energy: WaveOption,
+    pub name: String,
+    pub description: String,
+    /// Sent back verbatim when a Rotor session is created.
+    pub seeds: Vec<String>,
+}
+
+impl Default for WaveSettings {
+    fn default() -> Self {
+        Self {
+            name: "My Wave".into(),
+            description: "Your usual personalized mix".into(),
+            seeds: vec!["user:onyourwave".into()],
+        }
+    }
+}
+
+/// Dynamic presets advertised by the wheel for the current Wave.
+#[derive(Debug, Clone)]
+pub struct WaveChoices {
+    pub options: Vec<WaveSettings>,
 }
 
 impl WaveSettings {
-    pub fn language_label(&self) -> &str {
-        &self.language.name
-    }
-
-    pub fn mood_label(&self) -> &str {
-        &self.mood_energy.name
-    }
-
-    pub fn diversity_label(&self) -> &str {
-        &self.diversity.name
-    }
-
     pub fn seeds(&self) -> Vec<String> {
-        let mut seeds = vec!["user:onyourwave".into()];
-        for choice in [&self.language, &self.mood_energy, &self.diversity] {
-            if let Some(seed) = &choice.seed {
-                seeds.push(seed.clone());
-            }
-        }
-        seeds
+        self.seeds.clone()
     }
-}
 
-impl WaveRestrictions {
-    pub fn defaults(&self) -> Option<WaveSettings> {
-        Some(WaveSettings {
-            language: self
-                .language
-                .iter()
-                .find(|option| option.seed.is_none())?
-                .clone(),
-            mood_energy: self
-                .mood_energy
-                .iter()
-                .find(|option| option.seed.is_none())?
-                .clone(),
-            diversity: self
-                .diversity
-                .iter()
-                .find(|option| option.seed.is_none())?
-                .clone(),
-        })
+    pub fn is_default(&self) -> bool {
+        self.seeds.len() == 1 && self.seeds[0] == "user:onyourwave"
     }
 }
 
 #[derive(Debug, Deserialize)]
-pub struct RawStationResult {
-    pub station: RawWaveStation,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct RawWaveStation {
-    #[serde(rename = "restrictions2")]
-    pub restrictions: RawWaveRestrictions,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct RawWaveRestrictions {
-    pub language: RawEnumRestriction,
-    pub diversity: RawEnumRestriction,
-    #[serde(rename = "moodEnergy")]
-    pub mood_energy: RawEnumRestriction,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct RawEnumRestriction {
-    #[serde(rename = "possibleValues")]
-    pub possible_values: Vec<RawRestrictionValue>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct RawRestrictionValue {
-    pub name: String,
-    #[serde(rename = "serializedSeed")]
-    pub serialized_seed: String,
+pub struct RawWheelResult {
     #[serde(default)]
-    pub unspecified: bool,
+    pub items: Vec<RawWheelItem>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RawWheelItem {
+    #[serde(rename = "type")]
+    pub item_type: String,
+    pub data: RawWheelData,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RawWheelData {
+    pub wave: Option<RawWheel>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RawWheel {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub seeds: Vec<String>,
 }
 
 #[cfg(test)]
@@ -209,28 +167,15 @@ mod wave_tests {
     use super::*;
 
     #[test]
-    fn wave_settings_build_session_only_seeds() {
+    fn wave_settings_preserve_server_seeds() {
         let settings = WaveSettings {
-            language: WaveOption {
-                name: "Русский".into(),
-                seed: Some("settingLanguage:russian".into()),
-            },
-            mood_energy: WaveOption {
-                name: "Любое".into(),
-                seed: None,
-            },
-            diversity: WaveOption {
-                name: "Незнакомое".into(),
-                seed: Some("settingDiversity:discover".into()),
-            },
+            name: "Aggressive in English".into(),
+            description: "My Wave".into(),
+            seeds: vec!["mood:aggressive".into(), "local-language:english".into()],
         };
         assert_eq!(
             settings.seeds(),
-            [
-                "user:onyourwave",
-                "settingLanguage:russian",
-                "settingDiversity:discover",
-            ]
+            ["mood:aggressive", "local-language:english"]
         );
     }
 }

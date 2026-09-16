@@ -175,33 +175,24 @@ impl Client {
         self.parse_wave_response(request).await
     }
 
-    /// Discover tuning choices advertised for the current user's Wave.
-    pub async fn wave_restrictions(&self) -> Result<WaveRestrictions> {
-        let response: Envelope<Vec<RawStationResult>> = send_retrying(
-            self.get("/rotor/station/user:onyourwave/info")
-                .header(reqwest::header::ACCEPT_LANGUAGE, UI_LANGUAGE),
+    /// Discover the presets advertised by the official Wave wheel.
+    pub async fn wave_choices(&self, current: &WaveSettings) -> Result<WaveChoices> {
+        let response: RawWheelResult = send_retrying(
+            self.rotor_post("/wheel/new").json(&serde_json::json!({
+                "context": {
+                    "type": "WAVE",
+                    "data": { "seeds": current.seeds },
+                },
+                "feedbacks": [],
+            })),
             "the wave settings failed to load",
         )
         .await?
         .json()
         .await
         .context("unexpected wave-settings response")?;
-        let raw = response
-            .result
-            .into_iter()
-            .next()
-            .context("the wave returned no settings")?
-            .station
-            .restrictions;
-        let restrictions = WaveRestrictions {
-            language: wave_options(raw.language),
-            mood_energy: wave_options(raw.mood_energy),
-            diversity: wave_options(raw.diversity),
-        };
-        restrictions
-            .defaults()
-            .context("the wave settings have no defaults")?;
-        Ok(restrictions)
+
+        wave_choices(current, response)
     }
 
     /// Continue an existing Wave session.
@@ -399,13 +390,59 @@ impl Client {
     }
 }
 
-fn wave_options(restriction: RawEnumRestriction) -> Vec<WaveOption> {
-    restriction
-        .possible_values
-        .into_iter()
-        .map(|value| WaveOption {
-            name: value.name,
-            seed: (!value.unspecified).then_some(value.serialized_seed),
-        })
-        .collect()
+fn wave_choices(current: &WaveSettings, response: RawWheelResult) -> Result<WaveChoices> {
+    let mut options = vec![current.clone()];
+    for item in response.items {
+        if item.item_type != "WAVE" {
+            continue;
+        }
+        let Some(wave) = item.data.wave else {
+            continue;
+        };
+        if wave.seeds.is_empty() || options.iter().any(|option| option.seeds == wave.seeds) {
+            continue;
+        }
+        options.push(WaveSettings {
+            name: wave.name,
+            description: wave.description,
+            seeds: wave.seeds,
+        });
+    }
+    if options.len() == 1 {
+        return Err(anyhow!("the wave wheel returned no presets"));
+    }
+    Ok(WaveChoices { options })
+}
+
+#[cfg(test)]
+mod wheel_tests {
+    use super::*;
+
+    #[test]
+    fn keeps_only_launchable_wave_items_and_preserves_seeds() {
+        let response: RawWheelResult = serde_json::from_value(serde_json::json!({
+            "items": [
+                {
+                    "type": "SETTING",
+                    "data": { "title": "Customize My Vibe" }
+                },
+                {
+                    "type": "WAVE",
+                    "data": { "wave": {
+                        "name": "Aggressive in English",
+                        "description": "My Vibe",
+                        "seeds": ["mood:aggressive", "local-language:english"]
+                    }}
+                }
+            ]
+        }))
+        .unwrap();
+
+        let choices = wave_choices(&WaveSettings::default(), response).unwrap();
+        assert_eq!(choices.options.len(), 2);
+        assert_eq!(
+            choices.options[1].seeds,
+            ["mood:aggressive", "local-language:english"]
+        );
+    }
 }
