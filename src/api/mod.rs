@@ -373,6 +373,29 @@ impl Client {
         send_retrying(request, "the wave rejected the event").await?;
         Ok(())
     }
+
+    /// Close a Wave session while switching to another one. The web client
+    /// uses the collection endpoint for this final feedback instead of
+    /// sending it to the old session's regular feedback URL.
+    pub async fn close_wave_session(
+        &self,
+        session_id: &str,
+        batch_id: Option<&str>,
+        event: Feedback,
+    ) -> Result<()> {
+        let request = self
+            .rotor_post("/rotor/sessions/feedbacks/")
+            .json(&serde_json::json!({
+                "feedbacks": [{
+                    "sessionId": session_id,
+                    "batchId": batch_id,
+                    "event": event.body(Self::timestamp()),
+                    "from": "tuiya-my-wave",
+                }],
+            }));
+        send_retrying(request, "the old wave session could not be closed").await?;
+        Ok(())
+    }
 }
 
 impl Feedback {

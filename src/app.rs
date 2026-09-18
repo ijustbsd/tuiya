@@ -472,6 +472,31 @@ impl App {
         });
     }
 
+    fn close_wave_session(&self) {
+        let Some(session_id) = self.wave_session_id.clone() else {
+            return;
+        };
+        let Some(playing) = self
+            .playing
+            .as_ref()
+            .filter(|playing| playing.tab == Tab::Wave)
+        else {
+            return;
+        };
+
+        let api = Arc::clone(&self.api);
+        let batch_id = self.wave_batch_id.clone();
+        let event = Feedback::Skip {
+            track_id: playing.track.radio_id(),
+            played_secs: self.played_secs(),
+        };
+        tokio::spawn(async move {
+            let _ = api
+                .close_wave_session(&session_id, batch_id.as_deref(), event)
+                .await;
+        });
+    }
+
     fn next_track(&mut self, skipped: bool) {
         let Some(playing) = self.playing.clone() else {
             return;
@@ -808,6 +833,7 @@ impl App {
     }
 
     fn restart_wave_with(&mut self, settings: WaveSettings) {
+        self.close_wave_session();
         let autoplay = self
             .playing
             .as_ref()
