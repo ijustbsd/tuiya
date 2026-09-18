@@ -341,6 +341,7 @@ mod tests {
             index: 1,
             track: Track {
                 id: "42".into(),
+                album_id: None,
                 title: title.into(),
                 artists: "Исполнитель".into(),
                 duration: Duration::from_secs(120),

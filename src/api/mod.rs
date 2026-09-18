@@ -78,6 +78,13 @@ pub struct Client {
 }
 
 impl Client {
+    fn timestamp() -> f64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64()
+    }
+
     pub fn quality(&self) -> &str {
         &self.quality
     }
@@ -196,10 +203,21 @@ impl Client {
     }
 
     /// Continue an existing Wave session.
-    pub async fn wave_tracks(&self, session_id: &str, after: &str) -> Result<WaveBatch> {
+    pub async fn wave_tracks(
+        &self,
+        session_id: &str,
+        queue: &[String],
+        feedbacks: &[Feedback],
+    ) -> Result<WaveBatch> {
         let request = self
             .rotor_post(&format!("/rotor/session/{session_id}/tracks"))
-            .json(&serde_json::json!({ "queue": [after] }));
+            .json(&serde_json::json!({
+                "queue": queue,
+                "feedbacks": feedbacks
+                    .iter()
+                    .map(|feedback| feedback.body(Self::timestamp()))
+                    .collect::<Vec<_>>(),
+            }));
 
         self.parse_wave_response(request).await
     }
@@ -342,12 +360,24 @@ impl Client {
         batch_id: Option<&str>,
         event: Feedback,
     ) -> Result<()> {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs_f64();
+        let timestamp = Self::timestamp();
 
-        let body = match &event {
+        let body = event.body(timestamp);
+        let request = self
+            .rotor_post(&format!("/rotor/session/{session_id}/feedback/"))
+            .json(&serde_json::json!({
+                "event": body,
+                "batchId": batch_id,
+                "from": "tuiya-my-wave",
+            }));
+        send_retrying(request, "the wave rejected the event").await?;
+        Ok(())
+    }
+}
+
+impl Feedback {
+    fn body(&self, timestamp: f64) -> serde_json::Value {
+        match self {
             Feedback::RadioStarted => serde_json::json!({
                 "type": "radioStarted",
                 "timestamp": timestamp,
@@ -376,17 +406,7 @@ impl Client {
                 "trackId": track_id,
                 "totalPlayedSeconds": played_secs,
             }),
-        };
-
-        let request = self
-            .rotor_post(&format!("/rotor/session/{session_id}/feedback/"))
-            .json(&serde_json::json!({
-                "event": body,
-                "batchId": batch_id,
-                "from": "tuiya-my-wave",
-            }));
-        send_retrying(request, "the wave rejected the event").await?;
-        Ok(())
+        }
     }
 }
 

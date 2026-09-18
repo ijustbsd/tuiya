@@ -7,6 +7,7 @@ use serde_json::Value;
 #[derive(Debug, Clone)]
 pub struct Track {
     pub id: String,
+    pub album_id: Option<String>,
     pub title: String,
     pub artists: String,
     pub duration: Duration,
@@ -14,6 +15,14 @@ pub struct Track {
 }
 
 impl Track {
+    /// Rotor identifies a track together with the album/version it came from.
+    pub fn radio_id(&self) -> String {
+        self.album_id.as_ref().map_or_else(
+            || self.id.clone(),
+            |album_id| format!("{}:{album_id}", self.id),
+        )
+    }
+
     pub fn label(&self) -> String {
         if self.artists.is_empty() {
             self.title.clone()
@@ -33,6 +42,9 @@ impl From<RawTrack> for Track {
             .join(" & ");
         Track {
             id: raw.id,
+            album_id: raw
+                .album_id
+                .or_else(|| raw.albums.first().map(|album| album.id.clone())),
             title: raw.title.unwrap_or_else(|| "Untitled".to_string()),
             artists,
             duration: Duration::from_millis(raw.duration_ms.unwrap_or(0)),
@@ -52,6 +64,17 @@ fn flexible_id<'de, D: Deserializer<'de>>(de: D) -> Result<String, D::Error> {
     }
 }
 
+fn flexible_optional_id<'de, D: Deserializer<'de>>(de: D) -> Result<Option<String>, D::Error> {
+    match Value::deserialize(de)? {
+        Value::Null => Ok(None),
+        Value::String(s) => Ok(Some(s)),
+        Value::Number(n) => Ok(Some(n.to_string())),
+        other => Err(serde::de::Error::custom(format!(
+            "expected an optional id, got {other}"
+        ))),
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct RawArtist {
     #[serde(default)]
@@ -59,12 +82,22 @@ pub struct RawArtist {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct RawAlbum {
+    #[serde(deserialize_with = "flexible_id")]
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct RawTrack {
     #[serde(deserialize_with = "flexible_id")]
     pub id: String,
+    #[serde(rename = "albumId", deserialize_with = "flexible_optional_id", default)]
+    pub album_id: Option<String>,
     pub title: Option<String>,
     #[serde(default)]
     pub artists: Vec<RawArtist>,
+    #[serde(default)]
+    pub albums: Vec<RawAlbum>,
     #[serde(rename = "durationMs")]
     pub duration_ms: Option<u64>,
     pub available: Option<bool>,

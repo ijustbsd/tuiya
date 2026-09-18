@@ -144,6 +144,7 @@ pub struct App {
     wave_batch_id: Option<String>,
     wave_session_id: Option<String>,
     wave_requested: bool,
+    wave_feedbacks: Vec<Feedback>,
     wave_generation: u64,
     /// The wave ran dry: play as soon as the next batch arrives.
     wave_autoplay_pending: bool,
@@ -187,6 +188,7 @@ impl App {
             wave_batch_id: None,
             wave_session_id: None,
             wave_requested: false,
+            wave_feedbacks: Vec::new(),
             wave_generation: 0,
             wave_autoplay_pending: false,
             epoch: 0,
@@ -280,9 +282,18 @@ impl App {
         if self.wave_requested {
             return;
         }
-        let Some(last) = self.wave.tracks.last().map(|t| t.id.clone()) else {
+        let queue: Vec<String> = self
+            .wave
+            .tracks
+            .iter()
+            .rev()
+            .take(2)
+            .rev()
+            .map(|track| track.id.clone())
+            .collect();
+        if queue.is_empty() {
             return;
-        };
+        }
         let Some(session_id) = self.wave_session_id.clone() else {
             return;
         };
@@ -291,10 +302,12 @@ impl App {
         let api = Arc::clone(&self.api);
         let tx = self.tx.clone();
         let generation = self.wave_generation;
+        let feedbacks = self.wave_feedbacks.clone();
+        self.wave_feedbacks.clear();
         tokio::spawn(async move {
             let _ = tx.send(Message::Wave {
                 generation,
-                result: api.wave_tracks(&session_id, &last).await,
+                result: api.wave_tracks(&session_id, &queue, &feedbacks).await,
             });
         });
     }
@@ -447,7 +460,11 @@ impl App {
             return;
         };
         let api = Arc::clone(&self.api);
-        let batch_id = self.wave_batch_id.clone();
+        let batch_id = if matches!(&event, Feedback::RadioStarted) {
+            None
+        } else {
+            self.wave_batch_id.clone()
+        };
         tokio::spawn(async move {
             let _ = api
                 .wave_feedback(&session_id, batch_id.as_deref(), event)
@@ -461,15 +478,14 @@ impl App {
         };
         if playing.tab == Tab::Wave {
             let played_secs = self.played_secs();
-            let track_id = playing.track.id.clone();
-            self.report(if skipped {
+            self.wave_feedbacks.push(if skipped {
                 Feedback::Skip {
-                    track_id,
+                    track_id: playing.track.radio_id(),
                     played_secs,
                 }
             } else {
                 Feedback::TrackFinished {
-                    track_id,
+                    track_id: playing.track.radio_id(),
                     played_secs,
                 }
             });
@@ -520,7 +536,7 @@ impl App {
             }
             if playing.tab == Tab::Wave {
                 self.report(Feedback::TrackStarted {
-                    track_id: playing.track.id.clone(),
+                    track_id: playing.track.radio_id(),
                 });
             }
             self.prefetch(playing.tab, playing.index);
@@ -803,6 +819,7 @@ impl App {
         self.wave_batch_id = None;
         self.wave_session_id = None;
         self.wave_requested = false;
+        self.wave_feedbacks.clear();
         self.status = "Starting a new Wave session…".into();
         self.start_wave(autoplay);
         self.load_wave_choices();
