@@ -472,6 +472,34 @@ impl App {
         });
     }
 
+    fn report_play(&self, playing: &Playing, played_secs: f64, reason: &str) {
+        if !playing.reported {
+            return;
+        }
+        let api = Arc::clone(&self.api);
+        let track_id = playing.track.radio_id();
+        let duration_secs = playing.track.duration.as_secs_f64();
+        let session_id = (playing.tab == Tab::Wave)
+            .then(|| self.wave_session_id.clone())
+            .flatten();
+        let batch_id = (playing.tab == Tab::Wave)
+            .then(|| self.wave_batch_id.clone())
+            .flatten();
+        let reason = reason.to_string();
+        tokio::spawn(async move {
+            let _ = api
+                .play(
+                    &track_id,
+                    duration_secs,
+                    played_secs,
+                    &reason,
+                    session_id.as_deref(),
+                    batch_id.as_deref(),
+                )
+                .await;
+        });
+    }
+
     fn close_wave_session(&self) {
         let Some(session_id) = self.wave_session_id.clone() else {
             return;
@@ -503,6 +531,11 @@ impl App {
         };
         if playing.tab == Tab::Wave {
             let played_secs = self.played_secs();
+            self.report_play(
+                &playing,
+                played_secs,
+                if skipped { "skip" } else { "trackFinished" },
+            );
             self.wave_feedbacks.push(if skipped {
                 Feedback::Skip {
                     track_id: playing.track.radio_id(),
@@ -514,6 +547,12 @@ impl App {
                     played_secs,
                 }
             });
+        } else {
+            self.report_play(
+                &playing,
+                self.played_secs(),
+                if skipped { "skip" } else { "trackFinished" },
+            );
         }
         self.advance(playing.tab, playing.index);
     }

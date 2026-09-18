@@ -352,6 +352,32 @@ impl Client {
         Ok(())
     }
 
+    /// Record a playback in the account history. This is separate from Rotor
+    /// feedback: `/plays` records listening history, while Rotor tunes Wave.
+    pub async fn play(
+        &self,
+        track_id: &str,
+        duration_secs: f64,
+        played_secs: f64,
+        change_reason: &str,
+        radio_session_id: Option<&str>,
+        batch_id: Option<&str>,
+    ) -> Result<()> {
+        let request = self.post("/plays").json(&serde_json::json!({
+            "trackId": track_id,
+            "from": "tuiya",
+            "timestamp": Self::timestamp(),
+            "duration": duration_secs,
+            "position": played_secs,
+            "totalPlayedSeconds": played_secs,
+            "changeReason": change_reason,
+            "radioSessionId": radio_session_id,
+            "batchId": batch_id,
+        }));
+        send_retrying(request, "the playback could not be recorded").await?;
+        Ok(())
+    }
+
     /// Tell the wave what is happening to a track. Failures here are not
     /// fatal: playback continues, the station just serves worse picks.
     pub async fn wave_feedback(
