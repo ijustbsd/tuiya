@@ -47,7 +47,7 @@ impl Snapshot {
             playing: app.playing.clone(),
             can_play: app.playing.is_some()
                 || app
-                    .queue(app.tab)
+                    .queue(app.view)
                     .tracks
                     .iter()
                     .any(|track| track.available),

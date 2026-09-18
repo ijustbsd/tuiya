@@ -78,6 +78,18 @@ pub struct Client {
 }
 
 impl Client {
+    #[cfg(test)]
+    pub fn for_test() -> Self {
+        Self {
+            http: reqwest::Client::new(),
+            token: String::new(),
+            quality: "high".into(),
+            codecs: "mp3".into(),
+            uid: 0,
+            display_name: "Test".into(),
+        }
+    }
+
     fn timestamp() -> f64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)

@@ -27,6 +27,8 @@ An unofficial third-party client, not affiliated with or endorsed by Yandex.
     including play/pause, next/previous, seeking, and Linux volume control.
 - [x] **Interface**
   - [x] Keyboard-driven TUI with event-based redraws and no autoplay on startup.
+  - [x] Responsive wide, compact, and minimal layouts with a persistent or
+    overlay navigation sidebar depending on terminal size.
   - [ ] Beautiful design. We are working on it; the thuja is a good start.
 - [ ] **Discovery and metadata**
   - [ ] Search.

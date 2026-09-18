@@ -67,6 +67,18 @@ pub struct Audio {
 }
 
 impl Audio {
+    #[cfg(test)]
+    pub fn for_test(volume: f32) -> Self {
+        let (tx, _rx) = channel();
+        Self {
+            tx,
+            state: Arc::new(Mutex::new(AudioState {
+                volume,
+                ..Default::default()
+            })),
+        }
+    }
+
     pub fn new(volume: f32) -> Result<Self> {
         let state = Arc::new(Mutex::new(AudioState {
             volume,

@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::event::{Event as TermEvent, EventStream, KeyCode, KeyEvent, KeyModifiers};
@@ -30,19 +30,74 @@ const SEEK_STEP: i64 = 5;
 const VOLUME_STEP: f32 = 0.05;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Tab {
+pub enum View {
     Wave,
     Likes,
 }
 
-impl Tab {
-    pub fn title(self) -> &'static str {
-        match self {
-            Tab::Wave => "Wave",
-            Tab::Likes => "Liked",
+/// Which part of the main screen receives navigation keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    Sidebar,
+    Content,
+}
+
+/// The responsive layout selected by the renderer for the current terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayoutMode {
+    Wide,
+    Compact,
+    Minimal,
+}
+
+#[derive(Debug, Clone)]
+pub struct SidebarState {
+    pub selected: usize,
+    pub wide_visible: bool,
+    pub overlay_open: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoticeKind {
+    Info,
+    Success,
+    Error,
+}
+
+#[derive(Debug, Clone)]
+pub struct Notice {
+    pub kind: NoticeKind,
+    pub text: String,
+    expires_at: Option<Instant>,
+}
+
+impl Default for SidebarState {
+    fn default() -> Self {
+        Self {
+            selected: 0,
+            wide_visible: true,
+            overlay_open: false,
         }
     }
 }
+
+impl SidebarState {
+    fn move_selection(&mut self, delta: isize) {
+        self.selected = (self.selected as isize + delta).clamp(0, 1) as usize;
+    }
+
+    fn selected_view(&self) -> View {
+        if self.selected == 0 {
+            View::Wave
+        } else {
+            View::Likes
+        }
+    }
+}
+
+// Playback queues still use this name internally. Keeping the alias makes the
+// view migration independent from the audio and media-control code.
+pub type Tab = View;
 
 /// A track list with a separate cursor (what is highlighted) and current
 /// entry (what is playing) — they move independently so you can browse
@@ -123,12 +178,15 @@ pub struct App {
     cache_dir: PathBuf,
     cache_limit: u64,
 
-    pub tab: Tab,
+    pub view: View,
+    pub focus: Focus,
+    pub layout_mode: LayoutMode,
+    pub sidebar: SidebarState,
     pub wave: Queue,
     pub likes: Queue,
     pub liked: HashSet<String>,
     pub playing: Option<Playing>,
-    pub status: String,
+    pub notice: Option<Notice>,
     pub shuffle: bool,
     pub volume: f32,
     pub loading_track: bool,
@@ -169,12 +227,19 @@ impl App {
             audio,
             cache_dir,
             cache_limit: preferences.cache_limit_mb.saturating_mul(1024 * 1024),
-            tab: Tab::Wave,
+            view: View::Wave,
+            focus: Focus::Content,
+            layout_mode: LayoutMode::Wide,
+            sidebar: SidebarState::default(),
             wave: Queue::default(),
             likes: Queue::default(),
             liked: HashSet::new(),
             playing: None,
-            status: "Starting the wave…".to_string(),
+            notice: Some(Notice {
+                kind: NoticeKind::Info,
+                text: "Starting the wave…".to_string(),
+                expires_at: None,
+            }),
             shuffle: false,
             volume,
             loading_track: false,
@@ -198,12 +263,39 @@ impl App {
         }
     }
 
+    fn set_notice(&mut self, kind: NoticeKind, text: impl Into<String>) {
+        let expires_at = match kind {
+            NoticeKind::Info | NoticeKind::Success => Some(Instant::now() + Duration::from_secs(3)),
+            NoticeKind::Error => None,
+        };
+        self.notice = Some(Notice {
+            kind,
+            text: text.into(),
+            expires_at,
+        });
+    }
+
+    fn expire_notice(&mut self) -> bool {
+        let expired = self
+            .notice
+            .as_ref()
+            .and_then(|notice| notice.expires_at)
+            .is_some_and(|expires_at| Instant::now() >= expires_at);
+        if expired {
+            self.notice = None;
+        }
+        expired
+    }
+
     pub async fn run(mut self, mut terminal: DefaultTerminal) -> Result<()> {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         let media = match crate::media::Session::new(self.tx.clone()) {
             Ok(media) => Some(media),
             Err(error) => {
-                self.status = format!("System media controls unavailable: {error:#}");
+                self.set_notice(
+                    NoticeKind::Error,
+                    format!("System media controls unavailable: {error:#}"),
+                );
                 None
             }
         };
@@ -217,19 +309,26 @@ impl App {
         while !self.should_quit {
             tokio::select! {
                 _ = ticker.tick() => {
+                    let notice_expired = self.expire_notice();
                     self.poll_audio();
                     #[cfg(any(target_os = "linux", target_os = "macos"))]
                     if let Some(media) = &media {
                         media.update(&self);
                     }
-                    if self.playing.is_some() {
+                    if self.playing.is_some() || notice_expired {
                         terminal.draw(|frame| ui::render(frame, &mut self))?;
                     }
                 }
                 Some(Ok(event)) = events.next() => {
-                    if let TermEvent::Key(key) = event {
-                        self.on_key(key);
-                        terminal.draw(|frame| ui::render(frame, &mut self))?;
+                    match event {
+                        TermEvent::Key(key) => {
+                            self.on_key(key);
+                            terminal.draw(|frame| ui::render(frame, &mut self))?;
+                        }
+                        TermEvent::Resize(_, _) => {
+                            terminal.draw(|frame| ui::render(frame, &mut self))?;
+                        }
+                        _ => {}
                     }
                 }
                 Some(message) = self.rx.recv() => {
@@ -393,7 +492,7 @@ impl App {
 
     fn play_index(&mut self, tab: Tab, index: usize) {
         let Some(index) = self.next_available(tab, index) else {
-            self.status = "No playable tracks left".to_string();
+            self.set_notice(NoticeKind::Info, "No playable tracks left");
             return;
         };
         let Some(track) = self.queue(tab).tracks.get(index).cloned() else {
@@ -415,7 +514,7 @@ impl App {
         {
             self.pause_on_load = false;
         }
-        self.status = format!("Loading \"{}\"…", track.label());
+        self.set_notice(NoticeKind::Info, format!("Loading \"{}\"…", track.label()));
         self.playing = Some(Playing {
             tab,
             index,
@@ -438,7 +537,7 @@ impl App {
                 Some(next) => self.play_index(Tab::Wave, next),
                 None => {
                     self.wave_autoplay_pending = true;
-                    self.status = "The wave is picking the next tracks…".to_string();
+                    self.set_notice(NoticeKind::Info, "The wave is picking the next tracks…");
                     self.request_more_wave();
                 }
             },
@@ -568,7 +667,7 @@ impl App {
             return;
         };
         if playing.index == 0 {
-            self.status = "This is the first track in the queue".to_string();
+            self.set_notice(NoticeKind::Info, "This is the first track in the queue");
             return;
         }
         self.play_index(playing.tab, playing.index - 1);
@@ -587,11 +686,14 @@ impl App {
         }
 
         if let Some(notice) = self.audio.take_notice() {
-            self.status = notice;
+            self.set_notice(NoticeKind::Info, notice);
         }
 
         if let Some(error) = state.error {
-            self.status = format!("Cannot play \"{}\": {error}", playing.track.label());
+            self.set_notice(
+                NoticeKind::Error,
+                format!("Cannot play \"{}\": {error}", playing.track.label()),
+            );
             self.loading_track = false;
             // One broken file is no reason to stop everything.
             self.advance(playing.tab, playing.index);
@@ -600,7 +702,7 @@ impl App {
 
         if state.loaded && !playing.reported {
             self.loading_track = false;
-            self.status = String::new();
+            self.notice = None;
             if let Some(current) = self.playing.as_mut() {
                 current.reported = true;
             }
@@ -632,6 +734,13 @@ impl App {
                 result: Ok(batch),
             } if generation == self.wave_generation => {
                 self.wave_requested = false;
+                if self
+                    .notice
+                    .as_ref()
+                    .is_some_and(|notice| notice.kind == NoticeKind::Info)
+                {
+                    self.notice = None;
+                }
                 if batch.batch_id.is_some() {
                     self.wave_batch_id = batch.batch_id.clone();
                 }
@@ -667,7 +776,10 @@ impl App {
                 if self.wave.tracks.is_empty() {
                     self.wave.placeholder = format!("The wave is not answering: {reason}");
                 }
-                self.status = format!("The wave is not answering: {reason}");
+                self.set_notice(
+                    NoticeKind::Error,
+                    format!("The wave is not answering: {reason}"),
+                );
             }
             Message::Wave { .. } => {}
             Message::WaveChoices(Ok(choices)) => {
@@ -683,12 +795,18 @@ impl App {
                 self.likes.tracks = tracks;
                 self.liked = liked;
                 self.likes.placeholder = "Nothing liked yet".to_string();
-                self.status = format!("{} liked tracks", self.likes.tracks.len());
+                self.set_notice(
+                    NoticeKind::Success,
+                    format!("{} liked tracks", self.likes.tracks.len()),
+                );
             }
             Message::Likes(Err(e)) => {
                 let reason = format!("{e:#}");
                 self.likes.placeholder = format!("Liked tracks failed to load: {reason}");
-                self.status = format!("Liked tracks failed to load: {reason}");
+                self.set_notice(
+                    NoticeKind::Error,
+                    format!("Liked tracks failed to load: {reason}"),
+                );
             }
             Message::Ready { epoch, source } => {
                 if let Some(playing) = self.playing.as_ref()
@@ -708,7 +826,7 @@ impl App {
                     return;
                 }
                 self.loading_track = false;
-                self.status = format!("Track download failed: {error}");
+                self.set_notice(NoticeKind::Error, format!("Track download failed: {error}"));
                 // A single failed track must not stall the wave.
                 if let Some(playing) = self.playing.clone() {
                     self.advance(playing.tab, playing.index);
@@ -717,13 +835,13 @@ impl App {
             Message::LikeChanged { track_id, liked } => {
                 if liked {
                     self.liked.insert(track_id);
-                    self.status = "Liked".to_string();
+                    self.set_notice(NoticeKind::Success, "Liked");
                 } else {
                     self.liked.remove(&track_id);
-                    self.status = "Like removed".to_string();
+                    self.set_notice(NoticeKind::Success, "Like removed");
                 }
             }
-            Message::Notice(text) => self.status = text,
+            Message::Notice(text) => self.set_notice(NoticeKind::Error, text),
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             Message::Media(event) => self.on_media(event),
         }
@@ -759,36 +877,67 @@ impl App {
             return;
         }
 
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('b') {
+            self.toggle_sidebar();
+            return;
+        }
+
+        if self.focus == Focus::Sidebar {
+            match key.code {
+                KeyCode::Char('j') | KeyCode::Down => {
+                    self.sidebar.move_selection(1);
+                    return;
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    self.sidebar.move_selection(-1);
+                    return;
+                }
+                KeyCode::Enter => {
+                    let tab = self.sidebar.selected_view();
+                    self.activate_tab(tab);
+                    self.focus = Focus::Content;
+                    self.sidebar.overlay_open = false;
+                    return;
+                }
+                KeyCode::Esc if self.layout_mode != LayoutMode::Wide => {
+                    self.sidebar.overlay_open = false;
+                    self.focus = Focus::Content;
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         match key.code {
             KeyCode::Char('o') => {
                 let mut preferences = self.preferences.clone();
                 preferences.volume = self.volume;
                 self.settings = Some(Settings::new(preferences));
             }
-            KeyCode::Char('w') if self.tab == Tab::Wave => {
+            KeyCode::Char('w') if self.view == View::Wave => {
                 if let (Some(settings), Some(choices)) = (&self.wave_settings, &self.wave_choices) {
                     self.wave_settings_dialog =
                         Some(WaveSettingsDialog::new(settings.clone(), choices.clone()));
                 }
             }
-            KeyCode::Char('R') if self.tab == Tab::Wave && self.wave_is_custom() => {
+            KeyCode::Char('R') if self.view == View::Wave && self.wave_is_custom() => {
                 self.reset_wave_settings();
             }
             KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
-            KeyCode::Tab | KeyCode::BackTab => self.switch_tab(),
-            KeyCode::Char('1') => self.tab = Tab::Wave,
-            KeyCode::Char('2') => self.tab = Tab::Likes,
-            KeyCode::Char('j') | KeyCode::Down => self.queue_mut(self.tab).move_cursor(1),
-            KeyCode::Char('k') | KeyCode::Up => self.queue_mut(self.tab).move_cursor(-1),
-            KeyCode::PageDown => self.queue_mut(self.tab).move_cursor(10),
-            KeyCode::PageUp => self.queue_mut(self.tab).move_cursor(-10),
-            KeyCode::Home | KeyCode::Char('g') => self.queue_mut(self.tab).cursor = 0,
+            KeyCode::Tab | KeyCode::BackTab => self.toggle_focus(),
+            KeyCode::Char('1') => self.activate_tab(Tab::Wave),
+            KeyCode::Char('2') => self.activate_tab(Tab::Likes),
+            KeyCode::Char('j') | KeyCode::Down => self.queue_mut(self.view).move_cursor(1),
+            KeyCode::Char('k') | KeyCode::Up => self.queue_mut(self.view).move_cursor(-1),
+            KeyCode::PageDown => self.queue_mut(self.view).move_cursor(10),
+            KeyCode::PageUp => self.queue_mut(self.view).move_cursor(-10),
+            KeyCode::Home | KeyCode::Char('g') => self.queue_mut(self.view).cursor = 0,
             KeyCode::End | KeyCode::Char('G') => {
-                let queue = self.queue_mut(self.tab);
+                let queue = self.queue_mut(self.view);
                 queue.cursor = queue.tracks.len().saturating_sub(1);
             }
             KeyCode::Enter => {
-                let (tab, index) = (self.tab, self.queue(self.tab).cursor);
+                let (tab, index) = (self.view, self.queue(self.view).cursor);
                 self.play_index(tab, index);
             }
             KeyCode::Char(' ') => {
@@ -809,14 +958,15 @@ impl App {
             KeyCode::Char('l') => self.toggle_like(),
             KeyCode::Char('s') => {
                 self.shuffle = !self.shuffle;
-                self.status = if self.shuffle {
-                    "Shuffling liked tracks".to_string()
+                let message = if self.shuffle {
+                    "Shuffling liked tracks"
                 } else {
-                    "Playing liked tracks in order".to_string()
+                    "Playing liked tracks in order"
                 };
+                self.set_notice(NoticeKind::Info, message);
             }
             KeyCode::Char('r') => {
-                self.status = "Refreshing liked tracks…".to_string();
+                self.set_notice(NoticeKind::Info, "Refreshing liked tracks…");
                 self.likes.placeholder = "Loading…".to_string();
                 self.load_likes();
             }
@@ -845,7 +995,7 @@ impl App {
         self.audio.set_volume(values.volume);
         self.preferences = values;
         self.settings = None;
-        self.status = "Settings saved".into();
+        self.set_notice(NoticeKind::Success, "Settings saved");
         if quality_changed && let Some(playing) = &self.playing {
             self.prefetch(playing.tab, playing.index);
         }
@@ -867,7 +1017,7 @@ impl App {
             .expect("Wave settings are open")
             .selected_settings();
         if self.wave_settings.as_ref() == Some(&settings) {
-            self.status = "Wave settings unchanged".into();
+            self.set_notice(NoticeKind::Info, "Wave settings unchanged");
             return;
         }
         self.restart_wave_with(settings);
@@ -891,7 +1041,7 @@ impl App {
         self.wave_session_id = None;
         self.wave_requested = false;
         self.wave_feedbacks.clear();
-        self.status = "Starting a new Wave session…".into();
+        self.set_notice(NoticeKind::Info, "Starting a new Wave session…");
         self.start_wave(autoplay);
         self.load_wave_choices();
     }
@@ -905,7 +1055,7 @@ impl App {
                 if self.playing.is_some() {
                     self.audio.set_paused(false);
                 } else {
-                    self.play_index(self.tab, self.queue(self.tab).cursor);
+                    self.play_index(self.view, self.queue(self.view).cursor);
                 }
             }
             Event::Pause => {
@@ -917,7 +1067,7 @@ impl App {
                     self.pause_on_load = !self.pause_on_load;
                     self.audio.set_paused(self.pause_on_load);
                 } else {
-                    self.play_index(self.tab, self.queue(self.tab).cursor);
+                    self.play_index(self.view, self.queue(self.view).cursor);
                 }
             }
             Event::Next | Event::Previous => {
@@ -938,7 +1088,7 @@ impl App {
                 self.loading_track = false;
                 self.pause_on_load = false;
                 self.wave_autoplay_pending = false;
-                self.status.clear();
+                self.notice = None;
             }
             Event::SeekBy(seconds) => self.audio.seek_by(seconds),
             Event::SeekTo { epoch, position } => {
@@ -961,11 +1111,55 @@ impl App {
         }
     }
 
-    fn switch_tab(&mut self) {
-        self.tab = match self.tab {
-            Tab::Wave => Tab::Likes,
-            Tab::Likes => Tab::Wave,
+    fn activate_tab(&mut self, tab: Tab) {
+        self.view = tab;
+        self.sidebar.selected = match tab {
+            Tab::Wave => 0,
+            Tab::Likes => 1,
         };
+        if self.layout_mode != LayoutMode::Wide {
+            self.sidebar.overlay_open = false;
+        }
+    }
+
+    fn toggle_focus(&mut self) {
+        match self.layout_mode {
+            LayoutMode::Wide if self.sidebar.wide_visible => {
+                self.focus = match self.focus {
+                    Focus::Sidebar => Focus::Content,
+                    Focus::Content => Focus::Sidebar,
+                };
+            }
+            LayoutMode::Wide => self.focus = Focus::Content,
+            LayoutMode::Compact | LayoutMode::Minimal => {
+                if self.focus == Focus::Sidebar {
+                    self.sidebar.overlay_open = false;
+                    self.focus = Focus::Content;
+                } else {
+                    self.sidebar.overlay_open = true;
+                    self.focus = Focus::Sidebar;
+                }
+            }
+        }
+    }
+
+    fn toggle_sidebar(&mut self) {
+        match self.layout_mode {
+            LayoutMode::Wide => {
+                self.sidebar.wide_visible = !self.sidebar.wide_visible;
+                if !self.sidebar.wide_visible {
+                    self.focus = Focus::Content;
+                }
+            }
+            LayoutMode::Compact | LayoutMode::Minimal => {
+                self.sidebar.overlay_open = !self.sidebar.overlay_open;
+                self.focus = if self.sidebar.overlay_open {
+                    Focus::Sidebar
+                } else {
+                    Focus::Content
+                };
+            }
+        }
     }
 
     fn nudge_volume(&mut self, delta: f32) {
@@ -976,9 +1170,9 @@ impl App {
     /// Likes the playing track, or the highlighted one if nothing plays.
     fn toggle_like(&mut self) {
         let track = self.playing.as_ref().map(|p| p.track.clone()).or_else(|| {
-            self.queue(self.tab)
+            self.queue(self.view)
                 .tracks
-                .get(self.queue(self.tab).cursor)
+                .get(self.queue(self.view).cursor)
                 .cloned()
         });
 
@@ -1019,5 +1213,69 @@ impl App {
         self.wave_settings
             .as_ref()
             .is_some_and(|settings| !settings.is_default())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_app() -> App {
+        App::new(
+            Arc::new(Client::for_test()),
+            Audio::for_test(0.8),
+            PathBuf::new(),
+            Preferences {
+                quality: "high".into(),
+                cache_limit_mb: 128,
+                streaming: true,
+                volume: 0.8,
+            },
+        )
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn sidebar_selection_is_bounded_and_maps_to_views() {
+        let mut sidebar = SidebarState::default();
+        assert_eq!(sidebar.selected_view(), View::Wave);
+        sidebar.move_selection(-1);
+        assert_eq!(sidebar.selected, 0);
+        sidebar.move_selection(1);
+        assert_eq!(sidebar.selected_view(), View::Likes);
+        sidebar.move_selection(1);
+        assert_eq!(sidebar.selected, 1);
+    }
+
+    #[test]
+    fn wide_sidebar_focuses_and_opens_a_view() {
+        let mut app = test_app();
+        app.layout_mode = LayoutMode::Wide;
+        app.on_key(key(KeyCode::Tab));
+        assert_eq!(app.focus, Focus::Sidebar);
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.view, View::Likes);
+        assert_eq!(app.focus, Focus::Content);
+    }
+
+    #[test]
+    fn compact_navigation_uses_an_overlay_and_shortcuts_stay_direct() {
+        let mut app = test_app();
+        app.layout_mode = LayoutMode::Compact;
+        app.on_key(key(KeyCode::Tab));
+        assert!(app.sidebar.overlay_open);
+        assert_eq!(app.focus, Focus::Sidebar);
+        app.on_key(key(KeyCode::Esc));
+        assert!(!app.sidebar.overlay_open);
+        assert_eq!(app.focus, Focus::Content);
+
+        app.on_key(key(KeyCode::Char('2')));
+        assert_eq!(app.view, View::Likes);
+        app.on_key(key(KeyCode::Char('1')));
+        assert_eq!(app.view, View::Wave);
     }
 }
