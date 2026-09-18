@@ -1,39 +1,36 @@
 # tuiya
 
-A console player for Yandex Music.
+A fast, keyboard-driven terminal player for Yandex Music.
 
-```
- tuiya  Wave   Liked
-┌ My Wave ─────────────────────────────────────────────────────────────┐
-│▶ 1   Future                      Mask Off                     ♥ 03:25│
-│  2   Tony Yayo & Eminem          Drama Setter                   05:03│
-│  3   NØRTHERN STRINGS            Keep Me Alive                  04:48│
-└──────────────────────────────────────────────────────────────────────┘
-──────────────────────────────────────────────────────────────────────
-▶ Future — Mask Off  ♥
-███████░░░░░░░░░░░░░░░░░░░░░░░░░░░░  00:34 / 03:25   🔊 100%
-space pause · n next · b prev · ←/→ ±5s · l like · Tab switch · q quit
-```
+An unofficial third-party client, not affiliated with or endorsed by Yandex.
 
-## What it does
+![tuiya logo](assets/tuiya-logo.png)
 
-- **My Wave** — the endless personal station. The player refills the queue on
-  its own and reports events back to the station (`radioStarted`,
-  `trackStarted`, `trackFinished`, `skip`) so its picks keep adapting to what
-  you actually listen to.
-- **Liked tracks** — the whole liked list with metadata, in order or shuffled.
-- Like and unlike from inside the player.
-- System media controls on Linux (MPRIS) and macOS (Now Playing): the current
-  track appears in the desktop's media panel, with play/pause, next/previous
-  and seeking. Linux also exposes volume control.
-  Media keys work even when the terminal is not focused.
-- Streaming playback: a track starts within a second or two instead of after
-  its whole file has arrived.
-- On-disk cache: a streamed track is kept once it finishes, and the next track
-  is fetched ahead of time, so switching is instant. Old files are evicted once
-  the cache outgrows its limit.
-- `lossless` quality (FLAC in MP4), falling back to MP3 320 for tracks that
-  have no lossless version.
+## Features
+
+- [x] **Wave**
+  - [x] My Wave with adaptive Rotor feedback, queue continuation, and playback
+    history reporting.
+  - [ ] Dislike tracks in My Wave.
+- [x] **Library**
+  - [x] Liked tracks with metadata, in order or shuffled.
+  - [x] Like and unlike tracks from inside the player.
+  - [ ] Playlists.
+  - [ ] Liked playlists.
+- [x] **Playback**
+  - [x] Streaming playback with on-disk caching and next-track prefetch.
+  - [x] Lossless quality with MP3 320 fallback.
+  - [ ] Download tracks for offline listening or playback in another app
+    (separate from the playback cache).
+- [x] **Integrations**
+  - [x] System media controls on Linux (MPRIS) and macOS (Now Playing),
+    including play/pause, next/previous, seeking, and Linux volume control.
+- [x] **Interface**
+  - [x] Keyboard-driven TUI with event-based redraws and no autoplay on startup.
+  - [ ] Beautiful design. We are working on it; the thuja is a good start.
+- [ ] **Discovery and metadata**
+  - [ ] Search.
+  - [ ] Cover art and lyrics.
 
 ## Install
 
@@ -87,23 +84,6 @@ cargo build --release --locked
 
 ## Configuration
 
-When Yandex advertises tuning choices, press `w` on the Wave tab to tune the
-current Wave by language, mood and mix. Choose **Apply to Wave** to start a
-fresh Rotor session. These choices are not saved to the account or config;
-every tuiya launch loads the default personal Wave without starting playback;
-press `Enter` to begin. If the choices cannot
-be loaded, the default Wave keeps working and the tuning control stays hidden.
-
-Press `o` in the player to open application Settings. Use `↑`/`↓` or `Tab` to
-select a field and `←`/`→` to change it. For the cache size, type a number in
-MB. Press `Ctrl-S` or select **Save changes** and press `Enter` to save;
-`Esc` cancels edits.
-
-Quality and streaming changes apply to subsequent track loads. Saving volume
-changes playback immediately and sets the startup volume. Saving the cache
-size trims completed cached tracks; the playing track and ongoing downloads
-are kept. Login credentials stay in the config when preferences are saved.
-
 On the first run, tuiya opens a browser sign-in. Allow access to Yandex Music,
 then copy the full address after the redirect and paste it into the terminal.
 Input is hidden. tuiya extracts and checks the token, then saves it with mode
@@ -135,101 +115,3 @@ The token is the `access_token` value after `#` in the redirected URL.
 
 The token grants full access to the account, so keep the config at mode `600`
 and out of version control.
-
-## Keys
-
-| Key | Action |
-|---|---|
-| `Tab`, `1`, `2` | switch tab |
-| `j` / `k`, `↑` / `↓` | move through the list |
-| `PgUp` / `PgDn`, `g` / `G` | page, jump to start / end |
-| `Enter` | play the highlighted track |
-| `space` | pause / resume |
-| `n` | next track (counts as a skip for the wave) |
-| `b` | previous track |
-| `←` / `→` | seek 5 seconds |
-| `+` / `-` | volume |
-| `l` | like the playing track (or the highlighted one if nothing plays) |
-| `s` | shuffle liked tracks |
-| `r` | reload the liked list |
-| `w` | tune the current Wave session (on the Wave tab) |
-| `o` | open settings |
-| `q`, `Esc`, `Ctrl-C` | quit |
-
-On Linux, system media controls are registered automatically on the session
-D-Bus as `org.mpris.MediaPlayer2.tuiya.instance<PID>`. GNOME and KDE can display
-the track and route media keys to tuiya. You can also use
-`playerctl --player=tuiya play-pause` (or `next`, `previous`, `position 5+`).
-On window managers without media key handling, bind the keys to these commands.
-Playback still works when the session bus is unavailable.
-
-On macOS, tuiya publishes the track, artist, duration and playback position
-to Now Playing in Control Center. System media keys and headphone controls
-can play/pause and move between tracks while the terminal is unfocused.
-Now Playing also supports changing the playback position. The system chooses
-which active player receives media commands.
-
-## How it works
-
-```
-api/      calls to api.music.yandex.net: wave, likes, signed file links
-settings.rs preferences dialog, keyboard editing and validation
-stream.rs a partially downloaded track that can be read and seeked
-cache.rs  opens tracks for playback, downloads into ~/.cache/tuiya, eviction
-audio.rs  a dedicated OS thread running rodio: decoding and playback
-media/    Linux MPRIS and macOS Now Playing metadata and media commands
-app.rs    state, queues, keyboard, background tasks
-ui.rs     ratatui rendering
-```
-
-A link to an audio file is only handed out for an HMAC-SHA256-signed request
-(`get-file-info`), so a plain GET will not get you one; the signature is
-computed in `api::Client::download_info`.
-
-Everything that touches the network runs in its own tokio task and comes back
-to the UI as a message, so loading a 400-track list never blocks rendering.
-Playback lives on its own OS thread because stopping rodio can block, and in
-the render loop that would be visible.
-
-Streaming keeps the download in memory and hands the decoder a reader over it.
-Two regions are filled at once: the body arrives sequentially from the start,
-while a second range request fetches the last 256 KB. The tail matters because
-symphonia probes MP4 from the end — it jumps past `mdat` looking for trailing
-atoms — so without it every lossless track would have to download in full
-before its first sample. MP3 never reads there and skips the extra request.
-Playback begins once 256 KB has arrived, which keeps the decoder, running on
-the audio callback thread, from ever waiting on a read.
-
-## Releases
-
-Versions are not written down anywhere — they are worked out from commit
-messages. Pushing to `master` runs the lints and tests, decides the next
-version, builds binaries for Linux x86_64, Linux aarch64 and a universal
-macOS binary, and publishes a GitHub release with notes generated from the
-commits. `tuiya version` reports what it was built from; between tags it
-says so, as in `0.2.0-3-gaecf094`.
-
-This only works if commit subjects follow
-[conventional commits](https://www.conventionalcommits.org):
-
-| Prefix | Effect |
-|---|---|
-| `fix:` | patch release |
-| `feat:` | minor release |
-| `feat!:` or a `BREAKING CHANGE:` footer | major release |
-| `chore:`, `docs:`, `ci:`, `refactor:`, `test:`, `style:` | no release |
-
-A push carrying only the last row lands on `master` without cutting a
-release, which is what `cliff.toml` is for. Nothing is ever committed back to
-the branch: the version lives in the tag, and `build.rs` stamps it into the
-binary, so `Cargo.toml` never needs touching.
-
-## Known limitations
-
-- Seeking forward is held to the part that has downloaded, and says so in the
-  status line. Reading past it would block the audio thread and stall playback
-  outright, which is worse than a short seek.
-- Holding down the seek key drops most of the presses: rodio performs one seek
-  at a time and a new request replaces the pending one.
-- No dislike command for the wave.
-- No cover art, lyrics or search.
