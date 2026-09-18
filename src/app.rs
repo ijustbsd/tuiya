@@ -193,6 +193,7 @@ pub struct App {
     pub wave_settings: Option<WaveSettings>,
     pub wave_choices: Option<WaveChoices>,
     pub wave_settings_dialog: Option<WaveSettingsDialog>,
+    pub help_open: bool,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pause_on_load: bool,
     /// Preferences last saved through the settings dialog.
@@ -246,6 +247,7 @@ impl App {
             wave_settings: None,
             wave_choices: None,
             wave_settings_dialog: None,
+            help_open: false,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             pause_on_load: false,
             preferences,
@@ -859,6 +861,16 @@ impl App {
             return;
         }
 
+        if self.help_open {
+            if matches!(
+                key.code,
+                KeyCode::Char('?') | KeyCode::F(1) | KeyCode::Char('q') | KeyCode::Esc
+            ) {
+                self.help_open = false;
+            }
+            return;
+        }
+
         if let Some(settings) = &mut self.settings {
             match settings.on_key(key) {
                 Action::Cancel => self.settings = None,
@@ -909,6 +921,7 @@ impl App {
         }
 
         match key.code {
+            KeyCode::Char('?') | KeyCode::F(1) => self.help_open = true,
             KeyCode::Char('o') => {
                 let mut preferences = self.preferences.clone();
                 preferences.volume = self.volume;
@@ -1277,5 +1290,16 @@ mod tests {
         assert_eq!(app.view, View::Likes);
         app.on_key(key(KeyCode::Char('1')));
         assert_eq!(app.view, View::Wave);
+    }
+
+    #[test]
+    fn help_captures_input_until_it_is_closed() {
+        let mut app = test_app();
+        app.on_key(key(KeyCode::Char('?')));
+        assert!(app.help_open);
+        app.on_key(key(KeyCode::Char('2')));
+        assert_eq!(app.view, View::Wave);
+        app.on_key(key(KeyCode::Esc));
+        assert!(!app.help_open);
     }
 }

@@ -51,6 +51,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     if let Some(settings) = &mut app.wave_settings_dialog {
         render_wave_settings(frame, settings);
     }
+    if app.help_open {
+        render_help(frame);
+    }
 }
 
 fn layout_mode(area: Rect) -> LayoutMode {
@@ -167,9 +170,9 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App, mode: LayoutMode) {
     } else {
         "tuiya · "
     };
-    if area.width >= 32 {
+    if area.width >= 42 {
         let [title, settings] =
-            Layout::horizontal([Constraint::Fill(1), Constraint::Length(12)]).areas(area);
+            Layout::horizontal([Constraint::Fill(1), Constraint::Length(21)]).areas(area);
         frame.render_widget(
             Line::from(vec![
                 Span::styled(prefix, Style::new().fg(ACCENT).bold()),
@@ -178,7 +181,7 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App, mode: LayoutMode) {
             title,
         );
         frame.render_widget(
-            Line::from(Span::styled("o Settings", Style::new().fg(MUTED)))
+            Line::from(Span::styled("? Help · o Settings", Style::new().fg(MUTED)))
                 .alignment(Alignment::Right),
             settings,
         );
@@ -383,13 +386,15 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App, mode: LayoutMode) {
     } else {
         let base = match mode {
             LayoutMode::Wide if app.sidebar.wide_visible => {
-                "↑/↓ navigate · Enter play · Tab navigation · Space pause · n/b track · q quit"
+                "↑/↓ navigate · Enter play · Tab navigation · Space pause · n/b track · ? help · q quit"
             }
             LayoutMode::Wide => {
-                "↑/↓ navigate · Enter play · Ctrl-B menu · Space pause · n/b track · q quit"
+                "↑/↓ navigate · Enter play · Ctrl-B menu · Space pause · n/b track · ? help · q quit"
             }
-            LayoutMode::Compact => "↑/↓ navigate · Enter play · Tab menu · Space pause · q quit",
-            LayoutMode::Minimal => "↑/↓ · Enter · Tab · Space · q",
+            LayoutMode::Compact => {
+                "↑/↓ navigate · Enter play · Tab menu · Space pause · ? help · q quit"
+            }
+            LayoutMode::Minimal => "↑/↓ · Enter · Tab · Space · ? · q",
         };
         let wave = if app.view == Tab::Wave && app.wave_choices.is_some() {
             if app.wave_is_custom() {
@@ -431,6 +436,100 @@ fn truncate_to_width(value: &str, max_width: usize) -> String {
     }
     result.push('…');
     result
+}
+
+fn render_help(frame: &mut Frame) {
+    let area = frame.area();
+    let width = area.width.min(78);
+    let height = area.height.min(24);
+    let popup = Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    );
+    frame.render_widget(Clear, popup);
+    let block = Block::bordered()
+        .title(" Help ")
+        .border_style(Style::new().fg(ACCENT))
+        .style(Style::new().bg(Color::Black));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let [intro, body, footer] = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    frame.render_widget(
+        Paragraph::new(" Keyboard shortcuts and interface markers").style(Style::new().fg(MUTED)),
+        intro,
+    );
+
+    let navigation = vec![
+        help_heading("NAVIGATION"),
+        help_row("↑/↓, j/k", "Move selection"),
+        help_row("Enter", "Open or play"),
+        help_row("Tab", "Switch sidebar/content"),
+        help_row("Ctrl-B", "Show or hide sidebar"),
+        help_row("1 / 2", "Open Wave / Liked"),
+        Line::raw(""),
+        help_heading("PLAYBACK"),
+        help_row("Space", "Pause or resume"),
+        help_row("n / b", "Next / previous track"),
+        help_row("← / →", "Seek 5 seconds"),
+        help_row("+ / -", "Change volume"),
+    ];
+    let actions = vec![
+        help_heading("TRACKS AND LIBRARY"),
+        help_row("l", "Like or unlike"),
+        help_row("s", "Toggle liked shuffle"),
+        help_row("r", "Refresh liked tracks"),
+        Line::raw(""),
+        help_heading("WAVE"),
+        help_row("w", "Tune the current Wave"),
+        help_row("R", "Reset Wave tuning"),
+        Line::raw(""),
+        help_heading("GENERAL"),
+        help_row("o", "Open settings"),
+        help_row("? / F1", "Open or close help"),
+        help_row("q", "Quit player"),
+        help_row("Esc", "Close popup or sidebar"),
+        Line::raw(""),
+        help_heading("MARKERS"),
+        help_row("›  ▶  ♥", "Selected, playing, liked"),
+    ];
+
+    if inner.width >= 64 {
+        let [left, right] =
+            Layout::horizontal([Constraint::Percentage(50), Constraint::Fill(1)]).areas(body);
+        frame.render_widget(Paragraph::new(navigation), left);
+        frame.render_widget(Paragraph::new(actions), right);
+    } else {
+        let lines = navigation.into_iter().chain(actions).collect::<Vec<_>>();
+        frame.render_widget(Paragraph::new(lines), body);
+    }
+    frame.render_widget(
+        Paragraph::new("Esc, q, ? or F1 close")
+            .alignment(Alignment::Center)
+            .style(Style::new().fg(ACCENT)),
+        footer,
+    );
+}
+
+fn help_heading(title: &'static str) -> Line<'static> {
+    Line::from(Span::styled(
+        title,
+        Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+    ))
+}
+
+fn help_row(key: &'static str, description: &'static str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!(" {key:<11}"), Style::new().fg(Color::White).bold()),
+        Span::styled(description, Style::new().fg(MUTED)),
+    ])
 }
 
 fn render_settings(frame: &mut Frame, settings: &mut Settings) {
@@ -708,6 +807,21 @@ mod tests {
         assert!(output.contains("LIBRARY"));
         assert!(output.contains("Liked tracks"));
         assert!(rendered_row(&terminal, 23).contains("Esc close"));
+    }
+
+    #[test]
+    fn help_renders_at_regular_and_small_sizes() {
+        for (width, height) in [(100, 30), (60, 18), (40, 10), (1, 1)] {
+            let mut app = test_app();
+            app.help_open = true;
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|frame| render(frame, &mut app)).unwrap();
+            if width >= 40 && height >= 10 {
+                let output = rendered(&terminal);
+                assert!(output.contains("Help"));
+                assert!(output.contains("NAVIGATION"));
+            }
+        }
     }
 
     #[test]
