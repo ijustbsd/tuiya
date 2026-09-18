@@ -728,6 +728,17 @@ mod tests {
         app
     }
 
+    fn second_track() -> Track {
+        Track {
+            id: "2".into(),
+            album_id: None,
+            title: "Второй трек".into(),
+            artists: "Другой исполнитель".into(),
+            duration: Duration::from_secs(180),
+            available: true,
+        }
+    }
+
     fn rendered(terminal: &Terminal<TestBackend>) -> String {
         terminal
             .backend()
@@ -793,6 +804,29 @@ mod tests {
             assert!(output.contains("My Wave"));
             assert_eq!(output.contains("LIBRARY"), sidebar_expected);
         }
+    }
+
+    #[test]
+    fn selected_and_playing_rows_have_distinct_markers_and_styles() {
+        let mut app = test_app();
+        app.wave.tracks.push(second_track());
+        app.wave.cursor = 0;
+        app.wave.playing = Some(1);
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let width = buffer.area().width as usize;
+        let selected = &buffer.content()[2 * width + 27];
+        assert_eq!(selected.symbol(), "›");
+        assert_eq!(selected.bg, MUTED);
+
+        let playing_row = &buffer.content()[3 * width..4 * width];
+        let playing = playing_row
+            .iter()
+            .find(|cell| cell.symbol() == "▶")
+            .expect("playing marker");
+        assert_eq!(playing.fg, PLAYING);
     }
 
     #[test]
