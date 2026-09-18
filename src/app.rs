@@ -21,9 +21,9 @@ use crate::stream::TrackSource;
 use crate::ui;
 use crate::wave_settings::{Action as WaveSettingsAction, WaveSettingsDialog};
 
-/// Redraw rate. Second-level progress would be plenty, but a smooth bar
-/// looks more alive.
-const FRAME: Duration = Duration::from_millis(100);
+/// Audio polling interval. Discrete UI changes redraw immediately; while a
+/// track is playing this also refreshes the progress bar.
+const AUDIO_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// How many tracks before the end of the queue we ask the wave for more.
 const WAVE_REFILL_MARGIN: usize = 2;
 const SEEK_STEP: i64 = 5;
@@ -209,9 +209,9 @@ impl App {
         };
         self.load_likes();
         self.load_wave_choices();
-        self.start_wave(true);
+        self.start_wave(false);
 
-        let mut ticker = tokio::time::interval(FRAME);
+        let mut ticker = tokio::time::interval(AUDIO_POLL_INTERVAL);
         let mut events = EventStream::new();
 
         while !self.should_quit {
@@ -222,14 +222,20 @@ impl App {
                     if let Some(media) = &media {
                         media.update(&self);
                     }
-                    terminal.draw(|frame| ui::render(frame, &mut self))?;
+                    if self.playing.is_some() {
+                        terminal.draw(|frame| ui::render(frame, &mut self))?;
+                    }
                 }
                 Some(Ok(event)) = events.next() => {
                     if let TermEvent::Key(key) = event {
                         self.on_key(key);
+                        terminal.draw(|frame| ui::render(frame, &mut self))?;
                     }
                 }
-                Some(message) = self.rx.recv() => self.on_message(message),
+                Some(message) = self.rx.recv() => {
+                    self.on_message(message);
+                    terminal.draw(|frame| ui::render(frame, &mut self))?;
+                },
             }
         }
 

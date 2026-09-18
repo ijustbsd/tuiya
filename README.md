@@ -90,7 +90,8 @@ cargo build --release --locked
 When Yandex advertises tuning choices, press `w` on the Wave tab to tune the
 current Wave by language, mood and mix. Choose **Apply to Wave** to start a
 fresh Rotor session. These choices are not saved to the account or config;
-every tuiya launch starts with the default personal Wave. If the choices cannot
+every tuiya launch loads the default personal Wave without starting playback;
+press `Enter` to begin. If the choices cannot
 be loaded, the default Wave keeps working and the tuning control stays hidden.
 
 Press `o` in the player to open application Settings. Use `↑`/`↓` or `Tab` to
