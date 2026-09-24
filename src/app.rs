@@ -715,11 +715,15 @@ impl App {
             }
             self.prefetch(playing.tab, playing.index);
 
-            let _ = cache::prune(
-                &self.cache_dir,
-                self.cache_limit,
-                Some(playing.track.id.as_str()),
-            );
+            let directory = self.cache_dir.clone();
+            let limit = self.cache_limit;
+            let keep = playing.track.id.clone();
+            let events = self.tx.clone();
+            tokio::task::spawn_blocking(move || {
+                if let Err(error) = cache::prune(&directory, limit, Some(keep.as_str())) {
+                    let _ = events.send(Message::Notice(format!("Cannot trim the cache: {error}")));
+                }
+            });
         }
 
         if state.ended {
