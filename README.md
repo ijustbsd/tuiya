@@ -30,8 +30,8 @@ An unofficial third-party client, not affiliated with or endorsed by Yandex.
   - [x] Responsive wide, compact, and minimal layouts with a persistent or
     overlay navigation sidebar depending on terminal size.
   - [ ] Beautiful design. We are working on it; the thuja is a good start.
-- [ ] **Discovery and metadata**
-  - [ ] Search.
+- [x] **Discovery and metadata**
+  - [x] Track search.
   - [ ] Cover art and lyrics.
 
 ## Install

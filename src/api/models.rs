@@ -213,6 +213,61 @@ mod wave_tests {
     }
 }
 
+// --- Search --------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct RawSearchItem {
+    pub track: Option<RawTrack>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RawSearchPage {
+    #[serde(default)]
+    pub results: Vec<RawSearchItem>,
+    #[serde(rename = "lastPage", default)]
+    pub last_page: bool,
+}
+
+/// One page of track matches for a text query.
+#[derive(Debug, Clone)]
+pub struct SearchPage {
+    pub tracks: Vec<Track>,
+    pub last_page: bool,
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+
+    #[test]
+    fn search_results_keep_only_the_track_items() {
+        let page: RawSearchPage = serde_json::from_value(serde_json::json!({
+            "results": [
+                {
+                    "type": "track",
+                    "track": {
+                        "id": 68356,
+                        "title": "Ayo Technology",
+                        "durationMs": 249760,
+                        "artists": [{"name": "50 Cent"}],
+                        "albums": [{"id": 15406468}],
+                        "available": true,
+                    }
+                },
+                {"type": "album", "album": {"id": 1}}
+            ],
+            "lastPage": false
+        }))
+        .unwrap();
+
+        assert_eq!(page.results.len(), 2);
+        assert!(!page.last_page);
+        let track = page.results[0].track.as_ref().expect("a track item");
+        assert_eq!(track.id, "68356");
+        assert!(page.results[1].track.is_none());
+    }
+}
+
 // --- Liked tracks ------------------------------------------------------
 
 #[derive(Debug, Deserialize)]

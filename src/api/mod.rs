@@ -17,6 +17,12 @@ const UI_LANGUAGE: &str = "en";
 const SIGN_KEY: &[u8] = b"7tvSmFbyf5hJnIHhCimDDD";
 /// Track metadata is fetched in batches — a liked list can be long.
 const META_CHUNK: usize = 250;
+/// Search pages match the web client's track filter.
+const SEARCH_PAGE_SIZE: usize = 36;
+/// The web client asks for every entity kind even under the track filter;
+/// without the full list the instant search does not engage it.
+const SEARCH_TYPES: &str =
+    "album,artist,playlist,track,ugc_track,wave,podcast,podcast_episode,clip,concert";
 /// How many times to retry a request that came back 429 or 5xx.
 const RETRIES: u32 = 4;
 const FIRST_RETRY_DELAY: Duration = Duration::from_millis(400);
@@ -188,6 +194,18 @@ impl Client {
             .header(reqwest::header::ACCEPT_LANGUAGE, UI_LANGUAGE)
     }
 
+    fn rotor_get(&self, path: &str) -> reqwest::RequestBuilder {
+        self.http
+            .get(format!("{ROTOR_API}{path}"))
+            .timeout(REQUEST_TIMEOUT)
+            .header(
+                reqwest::header::AUTHORIZATION,
+                format!("OAuth {}", self.token),
+            )
+            .header("X-Yandex-Music-Client", CLIENT_HEADER)
+            .header(reqwest::header::ACCEPT_LANGUAGE, UI_LANGUAGE)
+    }
+
     /// Start a fresh, non-persistent "My Wave" session with tuning seeds.
     pub async fn start_wave(&self, settings: Option<&WaveSettings>) -> Result<WaveBatch> {
         let seeds = settings
@@ -266,6 +284,38 @@ impl Client {
             tracks,
             batch_id: result.batch_id,
             session_id: result.session_id,
+        })
+    }
+
+    /// Tracks matching a text query, one page at a time.
+    pub async fn search(&self, text: &str, page: u32) -> Result<SearchPage> {
+        let page = page.to_string();
+        let page_size = SEARCH_PAGE_SIZE.to_string();
+        let request = self.rotor_get("/search/instant/mixed").query(&[
+            ("text", text),
+            ("type", SEARCH_TYPES),
+            ("page", page.as_str()),
+            ("filter", "track"),
+            ("pageSize", page_size.as_str()),
+            ("withLikesCount", "true"),
+            ("withBestResults", "false"),
+        ]);
+
+        let response: Envelope<RawSearchPage> = send_retrying(request, "the search failed")
+            .await?
+            .json()
+            .await
+            .context("unexpected search response")?;
+
+        let result = response.result;
+        Ok(SearchPage {
+            tracks: result
+                .results
+                .into_iter()
+                .filter_map(|item| item.track)
+                .map(Track::from)
+                .collect(),
+            last_page: result.last_page,
         })
     }
 
