@@ -113,39 +113,45 @@ async fn stream_track(
 }
 
 async fn fetch_tail(client: &Client, url: &str, offset: u64) -> Result<Vec<u8>> {
-    let response = client
-        .http_get(url)
-        .header(reqwest::header::RANGE, format!("bytes={offset}-"))
-        .send()
-        .await
-        .context("cannot request the file tail")?;
+    let fetch = async {
+        let response = client
+            .http_get(url)
+            .header(reqwest::header::RANGE, format!("bytes={offset}-"))
+            .send()
+            .await
+            .context("cannot request the file tail")?;
 
-    // A server that ignores Range answers 200 OK with the whole file, and
-    // storing that at the tail offset would write the file's beginning over
-    // the tail region. The tail is an optimization, so distrusting the
-    // response must fall back to the sequential download instead.
-    if response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
-        anyhow::bail!("the server ignored the range request");
-    }
-
-    if let Some(range) = response.headers().get(reqwest::header::CONTENT_RANGE) {
-        let starts_at_offset = range
-            .to_str()
-            .ok()
-            .and_then(|value| value.strip_prefix("bytes "))
-            .and_then(|value| value.split('-').next())
-            .and_then(|value| value.parse::<u64>().ok())
-            == Some(offset);
-        if !starts_at_offset {
-            anyhow::bail!("the server answered with a different range");
+        // A server that ignores Range answers 200 OK with the whole file, and
+        // storing that at the tail offset would write the file's beginning over
+        // the tail region. The tail is an optimization, so distrusting the
+        // response must fall back to the sequential download instead.
+        if response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+            anyhow::bail!("the server ignored the range request");
         }
-    }
 
-    Ok(response
-        .bytes()
+        if let Some(range) = response.headers().get(reqwest::header::CONTENT_RANGE) {
+            let starts_at_offset = range
+                .to_str()
+                .ok()
+                .and_then(|value| value.strip_prefix("bytes "))
+                .and_then(|value| value.split('-').next())
+                .and_then(|value| value.parse::<u64>().ok())
+                == Some(offset);
+            if !starts_at_offset {
+                anyhow::bail!("the server answered with a different range");
+            }
+        }
+
+        response
+            .bytes()
+            .await
+            .context("the file tail did not arrive in full")
+            .map(|bytes| bytes.to_vec())
+    };
+    // The tail is small, so unlike the track body it gets a total timeout.
+    tokio::time::timeout(std::time::Duration::from_secs(30), fetch)
         .await
-        .context("the file tail did not arrive in full")?
-        .to_vec())
+        .context("the file tail request timed out")?
 }
 
 /// Downloads a track into the cache in full and returns its path.

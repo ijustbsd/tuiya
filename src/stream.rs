@@ -21,6 +21,10 @@ const START_BYTES: u64 = 256 * 1024;
 /// How often readiness is re-checked while waiting to start.
 const POLL: std::time::Duration = std::time::Duration::from_millis(20);
 
+/// How long playback may wait for the first bytes before giving up. The
+/// download itself stays unbounded — this only caps the stall at the start.
+const START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// A partially downloaded track held in memory.
 ///
 /// Two regions are valid at any moment: `[0, head)`, filled sequentially by the
@@ -195,17 +199,30 @@ impl SharedBuffer {
 }
 
 /// Blocks until enough has arrived for playback to start safely.
+///
+/// A stalled connection fails the buffer so readers blocked in `read_at`
+/// unblock with an error instead of waiting forever.
 pub async fn wait_playable(shared: &Arc<SharedBuffer>) -> Result<(), String> {
     let target = START_BYTES.min(shared.len());
-    loop {
-        let progress = shared.progress();
-        if let Some(error) = progress.error {
-            return Err(error);
+    let wait = async {
+        loop {
+            let progress = shared.progress();
+            if let Some(error) = progress.error {
+                return Err(error);
+            }
+            if progress.finished || (progress.head >= target && progress.tail_ready) {
+                return Ok(());
+            }
+            tokio::time::sleep(POLL).await;
         }
-        if progress.finished || (progress.head >= target && progress.tail_ready) {
-            return Ok(());
+    };
+    match tokio::time::timeout(START_TIMEOUT, wait).await {
+        Ok(result) => result,
+        Err(_) => {
+            let error = "the track did not start downloading in time".to_string();
+            shared.fail(error.clone());
+            Err(error)
         }
-        tokio::time::sleep(POLL).await;
     }
 }
 

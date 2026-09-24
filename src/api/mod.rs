@@ -20,6 +20,12 @@ const META_CHUNK: usize = 250;
 /// How many times to retry a request that came back 429 or 5xx.
 const RETRIES: u32 = 4;
 const FIRST_RETRY_DELAY: Duration = Duration::from_millis(400);
+/// reqwest has no default timeouts, and a stalled connection must fail
+/// instead of hanging the UI on "Loading…" forever.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// API calls are small JSON exchanges. Downloads go through `http_get` and
+/// get no total timeout: a slow FLAC must not be cut mid-transfer.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Sends a request, surviving temporary refusals.
 ///
@@ -110,6 +116,7 @@ impl Client {
     pub async fn new(token: &str, quality: &str, codecs: &str) -> Result<Self> {
         let http = reqwest::Client::builder()
             .user_agent("tuiya/0.1")
+            .connect_timeout(CONNECT_TIMEOUT)
             .build()
             .context("cannot build the http client")?;
 
@@ -144,6 +151,7 @@ impl Client {
     fn get(&self, path: &str) -> reqwest::RequestBuilder {
         self.http
             .get(format!("{API}{path}"))
+            .timeout(REQUEST_TIMEOUT)
             .header(
                 reqwest::header::AUTHORIZATION,
                 format!("OAuth {}", self.token),
@@ -152,6 +160,7 @@ impl Client {
     }
 
     /// Downloads from the CDN: the link carries its own signature, no token needed.
+    /// Deliberately no total timeout — a slow connection must finish the file.
     pub fn http_get(&self, url: &str) -> reqwest::RequestBuilder {
         self.http.get(url)
     }
@@ -159,6 +168,7 @@ impl Client {
     fn post(&self, path: &str) -> reqwest::RequestBuilder {
         self.http
             .post(format!("{API}{path}"))
+            .timeout(REQUEST_TIMEOUT)
             .header(
                 reqwest::header::AUTHORIZATION,
                 format!("OAuth {}", self.token),
@@ -169,6 +179,7 @@ impl Client {
     fn rotor_post(&self, path: &str) -> reqwest::RequestBuilder {
         self.http
             .post(format!("{ROTOR_API}{path}"))
+            .timeout(REQUEST_TIMEOUT)
             .header(
                 reqwest::header::AUTHORIZATION,
                 format!("OAuth {}", self.token),
