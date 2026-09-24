@@ -58,7 +58,7 @@ impl Config {
             let raw = std::fs::read_to_string(&path)
                 .with_context(|| format!("cannot read {}", path.display()))?;
             toml::from_str::<Config>(&raw)
-                .map_err(|_| anyhow::anyhow!("cannot parse {}", path.display()))?
+                .map_err(|e| anyhow::anyhow!("cannot parse {}: {e}", path.display()))?
         } else {
             Config {
                 token: String::new(),
@@ -78,6 +78,25 @@ impl Config {
         }
 
         Ok(config)
+    }
+
+    /// Loads the config for `tuiya login`: a config that cannot be parsed is
+    /// moved to a backup so login can start from defaults and save the token.
+    pub fn load_for_login() -> Result<Self> {
+        let path = Self::path()?;
+        if path.exists() {
+            let raw = std::fs::read_to_string(&path)
+                .with_context(|| format!("cannot read {}", path.display()))?;
+            if let Err(error) = toml::from_str::<Config>(&raw) {
+                let backup = backup_malformed(&path)?;
+                eprintln!(
+                    "Cannot parse {}: {error}\nMoved it to {} and starting from defaults.",
+                    path.display(),
+                    backup.display()
+                );
+            }
+        }
+        Self::load()
     }
 
     pub fn save_token(token: &str) -> Result<PathBuf> {
@@ -163,8 +182,13 @@ fn save_preferences_at(path: &Path, preferences: &Preferences) -> Result<()> {
 
 fn update_config(path: &Path, update: impl FnOnce(&mut toml::Table) -> Result<()>) -> Result<()> {
     let mut settings = match std::fs::read_to_string(path) {
-        Ok(raw) => toml::from_str::<toml::Table>(&raw)
-            .map_err(|_| anyhow::anyhow!("cannot parse the config; it has not been changed"))?,
+        Ok(raw) => match toml::from_str::<toml::Table>(&raw) {
+            Ok(settings) => settings,
+            Err(_) => {
+                backup_malformed(path)?;
+                toml::Table::new()
+            }
+        },
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
         Err(error) => return Err(error).context("cannot read the config"),
     };
@@ -193,6 +217,26 @@ fn update_config(path: &Path, update: impl FnOnce(&mut toml::Table) -> Result<()
         .map_err(|error| error.error)
         .context("cannot replace the config")?;
     Ok(())
+}
+
+/// Moves a malformed config aside so a fresh one can be written. The file is
+/// never deleted: the first free `config.toml.bak`, `config.toml.bak1`, … is used.
+fn backup_malformed(path: &Path) -> Result<PathBuf> {
+    let mut n = 0;
+    let backup = loop {
+        let candidate = if n == 0 {
+            path.with_extension("toml.bak")
+        } else {
+            path.with_extension(format!("toml.bak{n}"))
+        };
+        if !candidate.exists() {
+            break candidate;
+        }
+        n += 1;
+    };
+    std::fs::rename(path, &backup)
+        .with_context(|| format!("cannot move the malformed config to {}", backup.display()))?;
+    Ok(backup)
 }
 
 #[cfg(test)]
@@ -233,8 +277,13 @@ mod tests {
             );
         }
         std::fs::write(&path, "[broken").unwrap();
-        assert!(save_preferences_at(&path, &preferences).is_err());
-        assert_eq!(std::fs::read_to_string(path).unwrap(), "[broken");
+        save_preferences_at(&path, &preferences).unwrap();
+        let config: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(config.preferences(), preferences);
+        assert_eq!(
+            std::fs::read_to_string(path.with_extension("toml.bak")).unwrap(),
+            "[broken"
+        );
     }
 
     #[test]
@@ -262,7 +311,7 @@ mod tests {
     }
 
     #[test]
-    fn login_creates_a_config_and_does_not_overwrite_malformed_settings() {
+    fn login_creates_a_config_and_backs_up_malformed_settings() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tuiya/config.toml");
         save_token_at(&path, "test-token").unwrap();
@@ -270,8 +319,23 @@ mod tests {
         assert_eq!(config.token, "test-token");
         assert_eq!(config.api_quality(), "lossless");
         std::fs::write(&path, "[broken").unwrap();
-        assert!(save_token_at(&path, "replacement").is_err());
-        assert_eq!(std::fs::read_to_string(path).unwrap(), "[broken");
+        save_token_at(&path, "replacement").unwrap();
+        let config: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(config.token, "replacement");
+        assert_eq!(
+            std::fs::read_to_string(path.with_extension("toml.bak")).unwrap(),
+            "[broken"
+        );
+        std::fs::write(&path, "[broken again").unwrap();
+        save_token_at(&path, "third").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(path.with_extension("toml.bak")).unwrap(),
+            "[broken"
+        );
+        assert_eq!(
+            std::fs::read_to_string(path.with_extension("toml.bak1")).unwrap(),
+            "[broken again"
+        );
     }
 
     #[test]
