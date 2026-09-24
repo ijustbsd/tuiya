@@ -118,9 +118,28 @@ async fn fetch_tail(client: &Client, url: &str, offset: u64) -> Result<Vec<u8>> 
         .header(reqwest::header::RANGE, format!("bytes={offset}-"))
         .send()
         .await
-        .context("cannot request the file tail")?
-        .error_for_status()
-        .context("the server refused a range request")?;
+        .context("cannot request the file tail")?;
+
+    // A server that ignores Range answers 200 OK with the whole file, and
+    // storing that at the tail offset would write the file's beginning over
+    // the tail region. The tail is an optimization, so distrusting the
+    // response must fall back to the sequential download instead.
+    if response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+        anyhow::bail!("the server ignored the range request");
+    }
+
+    if let Some(range) = response.headers().get(reqwest::header::CONTENT_RANGE) {
+        let starts_at_offset = range
+            .to_str()
+            .ok()
+            .and_then(|value| value.strip_prefix("bytes "))
+            .and_then(|value| value.split('-').next())
+            .and_then(|value| value.parse::<u64>().ok())
+            == Some(offset);
+        if !starts_at_offset {
+            anyhow::bail!("the server answered with a different range");
+        }
+    }
 
     Ok(response
         .bytes()
