@@ -1303,8 +1303,9 @@ mod tests {
         assert_eq!(app.view, View::Wave);
     }
 
-    #[test]
-    fn exhausted_wave_clears_the_finished_track_once() {
+    // A reactor is needed because next_track spawns the play report.
+    #[tokio::test]
+    async fn exhausted_wave_clears_the_finished_track_once() {
         let mut app = test_app();
         let track = Track {
             id: "1".into(),
@@ -1321,7 +1322,8 @@ mod tests {
             index: 0,
             track,
             epoch: 1,
-            reported: false,
+            // A track that played to the end was reported when it started.
+            reported: true,
         });
 
         app.next_track(false);
