@@ -614,7 +614,7 @@ impl App {
         let Some(playing) = self
             .playing
             .as_ref()
-            .filter(|playing| playing.tab == Tab::Wave)
+            .filter(|playing| playing.tab == Tab::Wave && playing.reported)
         else {
             return;
         };
@@ -643,17 +643,19 @@ impl App {
                 played_secs,
                 if skipped { "skip" } else { "trackFinished" },
             );
-            self.wave_feedbacks.push(if skipped {
-                Feedback::Skip {
-                    track_id: playing.track.radio_id(),
-                    played_secs,
-                }
-            } else {
-                Feedback::TrackFinished {
-                    track_id: playing.track.radio_id(),
-                    played_secs,
-                }
-            });
+            if playing.reported {
+                self.wave_feedbacks.push(if skipped {
+                    Feedback::Skip {
+                        track_id: playing.track.radio_id(),
+                        played_secs,
+                    }
+                } else {
+                    Feedback::TrackFinished {
+                        track_id: playing.track.radio_id(),
+                        played_secs,
+                    }
+                });
+            }
         } else {
             self.report_play(
                 &playing,
