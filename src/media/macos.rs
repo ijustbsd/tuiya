@@ -12,14 +12,14 @@ use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::AnyObject;
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
 use objc2_core_foundation::{CFRunLoop, kCFRunLoopDefaultMode};
-use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSString};
+use objc2_foundation::{NSDictionary, NSNumber, NSString};
 use objc2_media_player::{
     MPChangePlaybackPositionCommandEvent, MPMediaItemPropertyArtist,
     MPMediaItemPropertyPlaybackDuration, MPMediaItemPropertyTitle, MPNowPlayingInfoCenter,
     MPNowPlayingInfoMediaType, MPNowPlayingInfoPropertyElapsedPlaybackTime,
     MPNowPlayingInfoPropertyMediaType, MPNowPlayingInfoPropertyPlaybackRate,
     MPNowPlayingPlaybackState, MPRemoteCommand, MPRemoteCommandCenter, MPRemoteCommandEvent,
-    MPRemoteCommandHandlerStatus, MPSkipIntervalCommandEvent,
+    MPRemoteCommandHandlerStatus,
 };
 use tokio::sync::mpsc;
 
@@ -109,6 +109,8 @@ impl Session {
             unsafe {
                 commands.seekForwardCommand().setEnabled(false);
                 commands.seekBackwardCommand().setEnabled(false);
+                commands.skipForwardCommand().setEnabled(false);
+                commands.skipBackwardCommand().setEnabled(false);
                 commands.changePlaybackRateCommand().setEnabled(false);
                 commands.changeRepeatModeCommand().setEnabled(false);
                 commands.changeShuffleModeCommand().setEnabled(false);
@@ -136,29 +138,6 @@ impl Session {
             connect!(previousTrackCommand, Previous, Previous);
             connect!(stopCommand, Stop, Stop);
 
-            for (command, direction) in unsafe {
-                [
-                    (commands.skipForwardCommand(), 1.0),
-                    (commands.skipBackwardCommand(), -1.0),
-                ]
-            } {
-                unsafe {
-                    command.setPreferredIntervals(&NSArray::from_retained_slice(&[
-                        NSNumber::new_f64(5.0),
-                    ]))
-                };
-                registrations.push(register(
-                    command.into_super(),
-                    Control::Seek,
-                    events.clone(),
-                    move |event| {
-                        let event = event.downcast_ref::<MPSkipIntervalCommandEvent>()?;
-                        let interval = unsafe { event.interval() };
-                        (interval.is_finite() && interval > 0.0)
-                            .then_some(Event::SeekBy(direction * interval))
-                    },
-                ));
-            }
             let seek_track = Arc::new(Mutex::new(None));
             let track = Arc::clone(&seek_track);
             registrations.push(register(
