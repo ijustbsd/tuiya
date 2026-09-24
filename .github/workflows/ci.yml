@@ -1,5 +1,8 @@
 name: CI
 
+# Pushes and pull requests only run checks. A release is cut manually:
+# Actions -> CI -> Run workflow, which folds every commit since the last tag
+# into a single release.
 on:
   push:
     branches: [master]
@@ -78,7 +81,9 @@ jobs:
   version:
     name: Decide the version
     needs: [lint, test]
-    if: github.event_name != 'pull_request'
+    # Only a manual dispatch proceeds past the checks; when this job is
+    # skipped, build and release skip with it.
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.calc.outputs.version }}
