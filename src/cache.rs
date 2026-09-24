@@ -195,6 +195,19 @@ async fn save_response(
     target: &Path,
     partial: &Path,
 ) -> Result<()> {
+    let result = try_save_response(&mut response, target, partial).await;
+    // A failed download never resumes, so the leftover fragment is useless.
+    if result.is_err() {
+        let _ = tokio::fs::remove_file(partial).await;
+    }
+    result
+}
+
+async fn try_save_response(
+    response: &mut reqwest::Response,
+    target: &Path,
+    partial: &Path,
+) -> Result<()> {
     let mut file = tokio::fs::File::create(partial)
         .await
         .with_context(|| format!("cannot create {}", partial.display()))?;
@@ -260,6 +273,9 @@ fn find_cached(cache_dir: &Path, track_id: &str, quality: &str) -> Option<PathBu
     legacy
 }
 
+/// How old a `.part` file must be before `prune` treats it as abandoned.
+const PART_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
 /// Drops least-recently-used files until the cache fits under the limit.
 /// The track playing right now is never removed.
 pub fn prune(cache_dir: &Path, limit_bytes: u64, keep: Option<&str>) -> Result<()> {
@@ -272,7 +288,18 @@ pub fn prune(cache_dir: &Path, limit_bytes: u64, keep: Option<&str>) -> Result<(
     for entry in entries.flatten() {
         let path = entry.path();
         let Ok(meta) = entry.metadata() else { continue };
-        if !meta.is_file() || path.extension().is_some_and(|ext| ext == "part") {
+        if !meta.is_file() {
+            continue;
+        }
+        if path.extension().is_some_and(|ext| ext == "part") {
+            // Young fragments belong to this session's in-progress downloads;
+            // only ones abandoned by a crash or kill are old enough to drop.
+            if meta
+                .modified()
+                .is_ok_and(|m| m.elapsed().is_ok_and(|age| age > PART_MAX_AGE))
+            {
+                let _ = std::fs::remove_file(&path);
+            }
             continue;
         }
         let accessed = meta.accessed().or_else(|_| meta.modified())?;
@@ -361,5 +388,24 @@ mod tests {
         for filename in ["43.high.mp3", "421.high.mp3"] {
             assert!(!root.join(filename).exists());
         }
+    }
+
+    #[test]
+    fn trimming_removes_only_abandoned_part_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let stale = root.join("43.lossless.part");
+        std::fs::write(&stale, b"fragment").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&stale)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - PART_MAX_AGE * 2)
+            .unwrap();
+        let fresh = root.join("44.lossless.part");
+        std::fs::write(&fresh, b"fragment").unwrap();
+        prune(root, u64::MAX, None).unwrap();
+        assert!(!stale.exists());
+        assert!(fresh.exists());
     }
 }
