@@ -22,6 +22,7 @@ pub enum Event {
     Next,
     Previous,
     Stop,
+    #[cfg(target_os = "linux")]
     SeekBy(f64),
     SeekTo {
         epoch: u64,

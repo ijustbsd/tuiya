@@ -1114,6 +1114,7 @@ impl App {
                 self.wave_autoplay_pending = false;
                 self.notice = None;
             }
+            #[cfg(target_os = "linux")]
             Event::SeekBy(seconds) => self.audio.seek_by(seconds),
             Event::SeekTo { epoch, position } => {
                 if self.playing.as_ref().is_some_and(|playing| {
