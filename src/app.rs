@@ -396,7 +396,7 @@ impl App {
             .rev()
             .take(2)
             .rev()
-            .map(|track| track.id.clone())
+            .map(|track| track.radio_id())
             .collect();
         if queue.is_empty() {
             return;
