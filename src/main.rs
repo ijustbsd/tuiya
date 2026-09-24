@@ -41,7 +41,7 @@ async fn main() -> Result<()> {
         }
         Command::Update => return update::run().await,
         Command::Login => {
-            login::run(&mut Config::load()?).await?;
+            login::run(&mut Config::load_for_login()?).await?;
             return Ok(());
         }
         Command::Play => {}
