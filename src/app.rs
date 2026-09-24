@@ -538,6 +538,11 @@ impl App {
             Tab::Wave => match self.next_available(Tab::Wave, index + 1) {
                 Some(next) => self.play_index(Tab::Wave, next),
                 None => {
+                    // The audio keeps reporting `ended` until a new track
+                    // starts; drop the finished track so poll_audio does not
+                    // re-report it on every tick while the refill is in flight.
+                    self.playing = None;
+                    self.loading_track = false;
                     self.wave_autoplay_pending = true;
                     self.set_notice(NoticeKind::Info, "The wave is picking the next tracks…");
                     self.request_more_wave();
@@ -1296,6 +1301,37 @@ mod tests {
         assert_eq!(app.view, View::Likes);
         app.on_key(key(KeyCode::Char('1')));
         assert_eq!(app.view, View::Wave);
+    }
+
+    #[test]
+    fn exhausted_wave_clears_the_finished_track_once() {
+        let mut app = test_app();
+        let track = Track {
+            id: "1".into(),
+            album_id: None,
+            title: "Track".into(),
+            artists: String::new(),
+            duration: Duration::from_secs(60),
+            available: true,
+        };
+        app.wave.tracks = vec![track.clone()];
+        app.wave.playing = Some(0);
+        app.playing = Some(Playing {
+            tab: Tab::Wave,
+            index: 0,
+            track,
+            epoch: 1,
+            reported: false,
+        });
+
+        app.next_track(false);
+        assert!(app.playing.is_none());
+        assert!(app.wave_autoplay_pending);
+        assert_eq!(app.wave_feedbacks.len(), 1);
+
+        // The audio keeps reporting `ended`; it must not be handled again.
+        app.next_track(false);
+        assert_eq!(app.wave_feedbacks.len(), 1);
     }
 
     #[test]
