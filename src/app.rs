@@ -11,7 +11,7 @@ use ratatui::widgets::TableState;
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 
-use crate::api::models::{Track, WaveBatch, WaveChoices, WaveSettings};
+use crate::api::models::{SearchPage, Track, WaveBatch, WaveChoices, WaveSettings};
 use crate::api::{Client, Feedback};
 use crate::audio::Audio;
 use crate::cache;
@@ -26,6 +26,8 @@ use crate::wave_settings::{Action as WaveSettingsAction, WaveSettingsDialog};
 const AUDIO_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// How many tracks before the end of the queue we ask the wave for more.
 const WAVE_REFILL_MARGIN: usize = 2;
+/// How many results before the end of the list we fetch the next search page.
+const SEARCH_REFILL_MARGIN: usize = 5;
 const SEEK_STEP: i64 = 5;
 const VOLUME_STEP: f32 = 0.05;
 
@@ -33,6 +35,7 @@ const VOLUME_STEP: f32 = 0.05;
 pub enum View {
     Wave,
     Likes,
+    Search,
 }
 
 /// Which part of the main screen receives navigation keys.
@@ -83,14 +86,14 @@ impl Default for SidebarState {
 
 impl SidebarState {
     fn move_selection(&mut self, delta: isize) {
-        self.selected = (self.selected as isize + delta).clamp(0, 1) as usize;
+        self.selected = (self.selected as isize + delta).clamp(0, 2) as usize;
     }
 
     fn selected_view(&self) -> View {
-        if self.selected == 0 {
-            View::Wave
-        } else {
-            View::Likes
+        match self.selected {
+            0 => View::Wave,
+            1 => View::Likes,
+            _ => View::Search,
         }
     }
 }
@@ -155,6 +158,10 @@ pub enum Message {
     },
     WaveChoices(Result<WaveChoices>),
     Likes(Result<(Vec<Track>, HashSet<String>)>),
+    Search {
+        generation: u64,
+        result: Result<SearchPage>,
+    },
     Ready {
         epoch: u64,
         source: TrackSource,
@@ -184,6 +191,11 @@ pub struct App {
     pub sidebar: SidebarState,
     pub wave: Queue,
     pub likes: Queue,
+    pub search: Queue,
+    pub search_input: String,
+    pub search_editing: bool,
+    /// The query that produced the current results — the input can differ.
+    pub search_query: String,
     pub liked: HashSet<String>,
     pub playing: Option<Playing>,
     pub notice: Option<Notice>,
@@ -207,6 +219,11 @@ pub struct App {
     wave_generation: u64,
     /// The wave ran dry: play as soon as the next batch arrives.
     wave_autoplay_pending: bool,
+
+    search_next_page: u32,
+    search_last_page: bool,
+    search_requested: bool,
+    search_generation: u64,
 
     epoch: u64,
     should_quit: bool,
@@ -234,6 +251,12 @@ impl App {
             sidebar: SidebarState::default(),
             wave: Queue::default(),
             likes: Queue::default(),
+            search: Queue {
+                placeholder: "Type a query and press Enter".to_string(),
+                ..Queue::default()
+            },
+            search_input: String::new(),
+            search_editing: false,
             liked: HashSet::new(),
             playing: None,
             notice: Some(Notice {
@@ -258,6 +281,11 @@ impl App {
             wave_feedbacks: Vec::new(),
             wave_generation: 0,
             wave_autoplay_pending: false,
+            search_query: String::new(),
+            search_next_page: 0,
+            search_last_page: false,
+            search_requested: false,
+            search_generation: 0,
             epoch: 0,
             should_quit: false,
             tx,
@@ -419,6 +447,56 @@ impl App {
         });
     }
 
+    /// Fetch the next page of the current query. A new query resets the
+    /// results and starts from page zero; paging just appends.
+    fn run_search(&mut self) {
+        let api = Arc::clone(&self.api);
+        let tx = self.tx.clone();
+        let generation = self.search_generation;
+        let query = self.search_query.clone();
+        let page = self.search_next_page;
+        self.search_requested = true;
+        tokio::spawn(async move {
+            let _ = tx.send(Message::Search {
+                generation,
+                result: api.search(&query, page).await,
+            });
+        });
+    }
+
+    fn submit_search(&mut self) {
+        self.search_editing = false;
+        let query = self.search_input.trim().to_string();
+        if query.is_empty() || (query == self.search_query && !self.search.tracks.is_empty()) {
+            return;
+        }
+        self.search_query = query;
+        self.search_generation += 1;
+        self.search = Queue {
+            placeholder: "Searching…".to_string(),
+            ..Queue::default()
+        };
+        self.search_next_page = 0;
+        self.search_last_page = false;
+        self.run_search();
+    }
+
+    fn request_more_search(&mut self) {
+        if self.search_requested || self.search_last_page || self.search_query.is_empty() {
+            return;
+        }
+        self.run_search();
+    }
+
+    /// Browsing near the end of the results pulls in the next page.
+    fn maybe_extend_search(&mut self) {
+        if self.view == View::Search
+            && self.search.cursor + SEARCH_REFILL_MARGIN >= self.search.tracks.len()
+        {
+            self.request_more_search();
+        }
+    }
+
     /// Open a track and report that it is ready to play.
     ///
     /// With streaming on this comes back after a fraction of the file, so the
@@ -463,6 +541,7 @@ impl App {
         match tab {
             Tab::Wave => &self.wave,
             Tab::Likes => &self.likes,
+            Tab::Search => &self.search,
         }
     }
 
@@ -470,13 +549,14 @@ impl App {
         match tab {
             Tab::Wave => &mut self.wave,
             Tab::Likes => &mut self.likes,
+            Tab::Search => &mut self.search,
         }
     }
 
     /// The nearest playable track at or after `start`.
     ///
-    /// The wave only moves forward while the liked list wraps around, hence
-    /// the two branches. Note this iterates rather than recurses: a run of
+    /// The wave only moves forward while fixed lists wrap around, hence the
+    /// two branches. Note this iterates rather than recurses: a run of
     /// unavailable tracks must not pile up the stack.
     fn next_available(&self, tab: Tab, start: usize) -> Option<usize> {
         let tracks = &self.queue(tab).tracks;
@@ -486,7 +566,7 @@ impl App {
         }
         match tab {
             Tab::Wave => (start..len).find(|&i| tracks[i].available),
-            Tab::Likes => (0..len)
+            Tab::Likes | Tab::Search => (0..len)
                 .map(|offset| (start + offset) % len)
                 .find(|&i| tracks[i].available),
         }
@@ -504,12 +584,10 @@ impl App {
         self.epoch += 1;
         let epoch = self.epoch;
 
-        // There must be exactly one ▶ marker — clear the other tab's.
-        let other = match tab {
-            Tab::Wave => Tab::Likes,
-            Tab::Likes => Tab::Wave,
-        };
-        self.queue_mut(other).playing = None;
+        // There must be exactly one ▶ marker — clear the other tabs'.
+        self.wave.playing = None;
+        self.likes.playing = None;
+        self.search.playing = None;
         self.queue_mut(tab).playing = Some(index);
         self.loading_track = true;
         #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -530,6 +608,9 @@ impl App {
         if tab == Tab::Wave && index + WAVE_REFILL_MARGIN >= self.wave.tracks.len() {
             self.request_more_wave();
         }
+        if tab == Tab::Search && index + SEARCH_REFILL_MARGIN >= self.search.tracks.len() {
+            self.request_more_search();
+        }
     }
 
     /// Move to the track after `index` on the `tab` tab.
@@ -548,16 +629,17 @@ impl App {
                     self.request_more_wave();
                 }
             },
-            Tab::Likes => {
-                if self.likes.tracks.is_empty() {
+            Tab::Likes | Tab::Search => {
+                let queue = self.queue(tab);
+                if queue.tracks.is_empty() {
                     return;
                 }
-                let next = if self.shuffle {
-                    rand::rng().random_range(0..self.likes.tracks.len())
+                let next = if tab == Tab::Likes && self.shuffle {
+                    rand::rng().random_range(0..queue.tracks.len())
                 } else {
-                    (index + 1) % self.likes.tracks.len()
+                    (index + 1) % queue.tracks.len()
                 };
-                self.play_index(Tab::Likes, next);
+                self.play_index(tab, next);
             }
         }
     }
@@ -821,6 +903,30 @@ impl App {
                     format!("Liked tracks failed to load: {reason}"),
                 );
             }
+            Message::Search {
+                generation,
+                result: Ok(page),
+            } if generation == self.search_generation => {
+                self.search_requested = false;
+                self.search_next_page += 1;
+                self.search_last_page = page.last_page;
+                self.search.tracks.extend(page.tracks);
+                if self.search.tracks.is_empty() && self.search_last_page {
+                    self.search.placeholder = "Nothing found".to_string();
+                }
+            }
+            Message::Search {
+                generation,
+                result: Err(e),
+            } if generation == self.search_generation => {
+                self.search_requested = false;
+                let reason = format!("{e:#}");
+                if self.search.tracks.is_empty() {
+                    self.search.placeholder = format!("Search failed: {reason}");
+                }
+                self.set_notice(NoticeKind::Error, format!("Search failed: {reason}"));
+            }
+            Message::Search { .. } => {}
             Message::Ready { epoch, source } => {
                 if let Some(playing) = self.playing.as_ref()
                     && playing.epoch == epoch
@@ -900,6 +1006,21 @@ impl App {
             return;
         }
 
+        if self.search_editing {
+            match key.code {
+                KeyCode::Esc => self.search_editing = false,
+                KeyCode::Enter => self.submit_search(),
+                KeyCode::Backspace => {
+                    self.search_input.pop();
+                }
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.search_input.push(c);
+                }
+                _ => {}
+            }
+            return;
+        }
+
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('b') {
             self.toggle_sidebar();
             return;
@@ -951,14 +1072,32 @@ impl App {
             KeyCode::Tab | KeyCode::BackTab => self.toggle_focus(),
             KeyCode::Char('1') => self.activate_tab(Tab::Wave),
             KeyCode::Char('2') => self.activate_tab(Tab::Likes),
-            KeyCode::Char('j') | KeyCode::Down => self.queue_mut(self.view).move_cursor(1),
-            KeyCode::Char('k') | KeyCode::Up => self.queue_mut(self.view).move_cursor(-1),
-            KeyCode::PageDown => self.queue_mut(self.view).move_cursor(10),
-            KeyCode::PageUp => self.queue_mut(self.view).move_cursor(-10),
-            KeyCode::Home | KeyCode::Char('g') => self.queue_mut(self.view).cursor = 0,
+            KeyCode::Char('3') => self.activate_tab(Tab::Search),
+            KeyCode::Char('/') if self.view == View::Search => self.search_editing = true,
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.queue_mut(self.view).move_cursor(1);
+                self.maybe_extend_search();
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.queue_mut(self.view).move_cursor(-1);
+                self.maybe_extend_search();
+            }
+            KeyCode::PageDown => {
+                self.queue_mut(self.view).move_cursor(10);
+                self.maybe_extend_search();
+            }
+            KeyCode::PageUp => {
+                self.queue_mut(self.view).move_cursor(-10);
+                self.maybe_extend_search();
+            }
+            KeyCode::Home | KeyCode::Char('g') => {
+                self.queue_mut(self.view).cursor = 0;
+                self.maybe_extend_search();
+            }
             KeyCode::End | KeyCode::Char('G') => {
                 let queue = self.queue_mut(self.view);
                 queue.cursor = queue.tracks.len().saturating_sub(1);
+                self.maybe_extend_search();
             }
             KeyCode::Enter => {
                 let (tab, index) = (self.view, self.queue(self.view).cursor);
@@ -1109,6 +1248,7 @@ impl App {
                 self.playing = None;
                 self.wave.playing = None;
                 self.likes.playing = None;
+                self.search.playing = None;
                 self.loading_track = false;
                 self.pause_on_load = false;
                 self.wave_autoplay_pending = false;
@@ -1141,7 +1281,11 @@ impl App {
         self.sidebar.selected = match tab {
             Tab::Wave => 0,
             Tab::Likes => 1,
+            Tab::Search => 2,
         };
+        if tab == Tab::Search && self.search_input.is_empty() {
+            self.search_editing = true;
+        }
         if self.layout_mode != LayoutMode::Wide {
             self.sidebar.overlay_open = false;
         }
@@ -1272,7 +1416,90 @@ mod tests {
         sidebar.move_selection(1);
         assert_eq!(sidebar.selected_view(), View::Likes);
         sidebar.move_selection(1);
-        assert_eq!(sidebar.selected, 1);
+        assert_eq!(sidebar.selected_view(), View::Search);
+        sidebar.move_selection(1);
+        assert_eq!(sidebar.selected, 2);
+    }
+
+    #[test]
+    fn search_view_captures_a_query_until_it_is_submitted() {
+        let mut app = test_app();
+        app.on_key(key(KeyCode::Char('3')));
+        assert_eq!(app.view, View::Search);
+        assert!(app.search_editing);
+
+        app.on_key(key(KeyCode::Char('d')));
+        app.on_key(key(KeyCode::Char('a')));
+        assert_eq!(app.search_input, "da");
+        app.on_key(key(KeyCode::Backspace));
+        assert_eq!(app.search_input, "d");
+
+        // Global shortcuts stay out of the input while editing.
+        app.on_key(key(KeyCode::Char('q')));
+        assert!(!app.should_quit);
+        assert_eq!(app.search_input, "dq");
+
+        app.on_key(key(KeyCode::Esc));
+        assert!(!app.search_editing);
+        app.on_key(key(KeyCode::Char('/')));
+        assert!(app.search_editing);
+    }
+
+    #[test]
+    fn an_empty_query_is_not_submitted() {
+        let mut app = test_app();
+        app.on_key(key(KeyCode::Char('3')));
+        app.on_key(key(KeyCode::Enter));
+        assert!(!app.search_editing);
+        assert!(!app.search_requested);
+    }
+
+    // A reactor is needed because submit_search spawns the request.
+    #[tokio::test]
+    async fn submitting_a_query_replaces_the_previous_results() {
+        let mut app = test_app();
+        app.on_key(key(KeyCode::Char('3')));
+        for code in [KeyCode::Char('5'), KeyCode::Char('0')] {
+            app.on_key(key(code));
+        }
+        app.on_key(key(KeyCode::Enter));
+        assert!(!app.search_editing);
+        assert!(app.search_requested);
+        assert_eq!(app.search_query, "50");
+        assert_eq!(app.search.placeholder, "Searching…");
+
+        let generation = app.search_generation;
+        app.on_message(Message::Search {
+            generation,
+            result: Ok(SearchPage {
+                tracks: vec![Track {
+                    id: "1".into(),
+                    album_id: None,
+                    title: "Track".into(),
+                    artists: String::new(),
+                    duration: Duration::from_secs(60),
+                    available: true,
+                }],
+                last_page: true,
+            }),
+        });
+        assert!(!app.search_requested);
+        assert_eq!(app.search.tracks.len(), 1);
+        assert!(app.search_last_page);
+
+        // A response from before the query changed arrives too late.
+        app.on_key(key(KeyCode::Char('/')));
+        app.on_key(key(KeyCode::Char('c')));
+        app.on_key(key(KeyCode::Enter));
+        app.on_message(Message::Search {
+            generation,
+            result: Ok(SearchPage {
+                tracks: vec![],
+                last_page: true,
+            }),
+        });
+        assert!(app.search.tracks.is_empty());
+        assert!(!app.search_last_page);
     }
 
     #[test]

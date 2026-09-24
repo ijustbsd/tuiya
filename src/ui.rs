@@ -125,6 +125,7 @@ fn render_sidebar(frame: &mut Frame, area: Rect, app: &App) {
     let entries = [
         (Tab::Wave, "My Wave", None),
         (Tab::Likes, "Liked tracks", Some(app.likes.tracks.len())),
+        (Tab::Search, "Search", None),
     ];
     let mut lines = vec![
         Line::from(Span::styled(" LIBRARY", Style::new().fg(MUTED).bold())),
@@ -164,6 +165,13 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App, mode: LayoutMode) {
             },
         ),
         Tab::Likes => format!("Liked tracks · {}", app.likes.tracks.len()),
+        Tab::Search => {
+            if app.search_query.is_empty() {
+                "Search".to_string()
+            } else {
+                format!("Search · {}", app.search_query)
+            }
+        }
     };
     let prefix = if mode == LayoutMode::Wide && app.sidebar.wide_visible {
         ""
@@ -376,6 +384,8 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App, mode: LayoutMode) {
             NoticeKind::Error => ERROR,
         };
         (notice.text.clone(), color)
+    } else if app.view == Tab::Search && app.search_editing {
+        (format!("Search: {}▌", app.search_input), ACCENT)
     } else if app.focus == Focus::Sidebar {
         let sidebar_help = if mode == LayoutMode::Wide {
             "↑/↓ navigate · Enter open · Tab content · q quit"
@@ -396,16 +406,18 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App, mode: LayoutMode) {
             }
             LayoutMode::Minimal => "↑/↓ · Enter · Tab · Space · ? · q",
         };
-        let wave = if app.view == Tab::Wave && app.wave_choices.is_some() {
+        let extra = if app.view == Tab::Wave && app.wave_choices.is_some() {
             if app.wave_is_custom() {
                 " · w tune · R reset"
             } else {
                 " · w tune"
             }
+        } else if app.view == Tab::Search {
+            " · / query"
         } else {
             ""
         };
-        (format!("{base}{wave}"), MUTED)
+        (format!("{base}{extra}"), MUTED)
     };
     frame.render_widget(
         Line::from(Span::styled(
@@ -441,7 +453,7 @@ fn truncate_to_width(value: &str, max_width: usize) -> String {
 fn render_help(frame: &mut Frame) {
     let area = frame.area();
     let width = area.width.min(78);
-    let height = area.height.min(24);
+    let height = area.height.min(27);
     let popup = Rect::new(
         area.x + (area.width - width) / 2,
         area.y + (area.height - height) / 2,
@@ -473,7 +485,7 @@ fn render_help(frame: &mut Frame) {
         help_row("Enter", "Open or play"),
         help_row("Tab", "Switch sidebar/content"),
         help_row("Ctrl-B", "Show or hide sidebar"),
-        help_row("1 / 2", "Open Wave / Liked"),
+        help_row("1 / 2 / 3", "Open Wave / Liked / Search"),
         Line::raw(""),
         help_heading("PLAYBACK"),
         help_row("Space", "Pause or resume"),
@@ -486,6 +498,11 @@ fn render_help(frame: &mut Frame) {
         help_row("l", "Like or unlike"),
         help_row("s", "Toggle liked shuffle"),
         help_row("r", "Refresh liked tracks"),
+        Line::raw(""),
+        help_heading("SEARCH"),
+        help_row("/", "Edit the search query"),
+        help_row("Enter", "Search, or play a result"),
+        help_row("Esc", "Stop editing the query"),
         Line::raw(""),
         help_heading("WAVE"),
         help_row("w", "Tune the current Wave"),
@@ -757,6 +774,27 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect()
+    }
+
+    #[test]
+    fn search_view_shows_the_query_input_while_editing() {
+        let mut app = test_app();
+        app.view = Tab::Search;
+        app.search_editing = true;
+        app.search_input = "50 cent".into();
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let output = rendered(&terminal);
+        assert!(output.contains("Search"));
+        assert!(output.contains("Search: 50 cent"));
+    }
+
+    #[test]
+    fn sidebar_lists_the_search_entry() {
+        let mut app = test_app();
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        assert!(rendered(&terminal).contains("Search"));
     }
 
     #[test]
